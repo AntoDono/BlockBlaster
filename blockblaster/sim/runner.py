@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import random
+import statistics
 from typing import Optional
 
 from tqdm import tqdm
@@ -15,12 +16,17 @@ from blockblaster.sim.io import list_episodes, write_episode
 from blockblaster.sim.rollout import run_episode
 
 
+# Per-episode summary returned to the parent process so it can aggregate
+# round statistics (mean / max score, etc.) without re-reading every JSON.
+EpisodeStats = tuple[int, int, bool]  # (total_score, episode_length, truncated)
+
+
 def _worker_init(epsilon: float, sim_dir: str) -> None:
     """Initializer stored as module-level so it can be pickled for mp."""
     pass
 
 
-def _run_one(args: tuple[int, int, float, str, int]) -> None:
+def _run_one(args: tuple[int, int, float, str, int]) -> EpisodeStats:
     """Top-level function (picklable) that runs one episode and saves it."""
     idx, seed, epsilon, sim_dir, checkpoint_epoch = args
     net: Optional[ValueNet] = None
@@ -44,6 +50,11 @@ def _run_one(args: tuple[int, int, float, str, int]) -> None:
         checkpoint_epoch=ckpt_epoch,
     )
     write_episode(traj, sim_dir, idx)
+    return (
+        int(traj["total_score"]),
+        int(traj["episode_length"]),
+        bool(traj["truncated"]),
+    )
 
 
 def run_simulations(
@@ -52,8 +63,17 @@ def run_simulations(
     sim_dir: str | None = None,
     workers: int | None = None,
     base_seed: int | None = None,
-) -> None:
-    """Run N episodes and save each as a JSON file."""
+) -> dict:
+    """Run N episodes, save each as a JSON file, and return aggregate stats.
+
+    Returned dict:
+        {
+            "scores": list[int],
+            "lengths": list[int],
+            "truncated": int,
+            "mean": float, "median": float, "max": int, "min": int,
+        }
+    """
     n = num_simulations if num_simulations is not None else param.NUM_SIMULATIONS
     eps = epsilon if epsilon is not None else param.SIM_EPSILON
     directory = sim_dir or param.SIMULATIONS_DIR
@@ -73,16 +93,23 @@ def run_simulations(
         for i in range(n)
     ]
 
+    scores: list[int] = []
+    lengths: list[int] = []
+    truncated_count = 0
+
     if num_workers > 1:
-        with mp.Pool(processes=num_workers) as pool:
-            for _ in tqdm(
+        # CUDA forbids fork-based re-initialization, so always use 'spawn'.
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=num_workers) as pool:
+            for score, length, truncated in tqdm(
                 pool.imap_unordered(_run_one, args_list),
                 total=n,
                 desc="Simulating",
                 unit="ep",
             ):
-                pass
-        _trim_oldest(directory, param.MAX_SIMULATIONS)
+                scores.append(score)
+                lengths.append(length)
+                truncated_count += int(truncated)
     else:
         # Single-process: reuse one loaded net for efficiency
         net_single: Optional[ValueNet] = None
@@ -105,8 +132,27 @@ def run_simulations(
                 checkpoint_epoch=ckpt_epoch,
             )
             write_episode(traj, directory, i)
+            scores.append(int(traj["total_score"]))
+            lengths.append(int(traj["episode_length"]))
+            truncated_count += int(traj["truncated"])
 
     _trim_oldest(directory, param.MAX_SIMULATIONS)
+
+    stats = {
+        "scores": scores,
+        "lengths": lengths,
+        "truncated": truncated_count,
+        "mean": statistics.fmean(scores) if scores else 0.0,
+        "median": statistics.median(scores) if scores else 0.0,
+        "max": max(scores) if scores else 0,
+        "min": min(scores) if scores else 0,
+    }
+    print(
+        f"  Score: mean={stats['mean']:.1f}  median={stats['median']:.1f}  "
+        f"max={stats['max']}  min={stats['min']}  "
+        f"(truncated {truncated_count}/{n})"
+    )
+    return stats
 
 
 def _trim_oldest(directory: str, max_episodes: int) -> None:

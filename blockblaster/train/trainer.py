@@ -58,6 +58,16 @@ def train() -> None:
         lr=param.LEARNING_RATE,
         weight_decay=param.WEIGHT_DECAY,
     )
+    # Restore Adam moment estimates across rounds so we don't throw away
+    # accumulated curvature information every simulate -> train iteration.
+    # Tensor-shape / device mismatches (e.g. after a model edit) silently fall
+    # back to a fresh optimiser.
+    if meta is not None and "optimizer_state" in meta:
+        try:
+            optimiser.load_state_dict(meta["optimizer_state"])
+            print("  Restored optimizer state from checkpoint")
+        except (ValueError, KeyError, RuntimeError) as e:
+            print(f"  Could not restore optimizer state ({e!s}); starting fresh")
     loss_fn = nn.MSELoss()
 
     # ── Training loop ───────────────────────────────────────────────────
@@ -101,7 +111,7 @@ def train() -> None:
 
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
-                save(net, epoch, best_test_loss)
+                save(net, epoch, best_test_loss, optimizer=optimiser)
                 print(f"  -> Checkpoint saved (epoch={epoch}, test_loss={best_test_loss:.4f})")
 
         log_epoch(epoch, avg_train_loss, test_loss, best_test_loss)
@@ -110,7 +120,7 @@ def train() -> None:
     # even if no eval epoch happened to beat best_test_loss this run.
     final_epoch = start_epoch + param.NUM_EPOCHS
     if best_test_loss == math.inf:
-        save(net, final_epoch, best_test_loss)
+        save(net, final_epoch, best_test_loss, optimizer=optimiser)
         print(f"  -> Checkpoint saved (epoch={final_epoch}, no eval yet)")
 
     print(f"\nTraining complete.  Best test loss this run: {best_test_loss:.4f}")
