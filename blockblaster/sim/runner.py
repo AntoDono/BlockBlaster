@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import random
 import statistics
+from pathlib import Path
 from typing import Optional
 
 from tqdm import tqdm
@@ -26,13 +27,12 @@ def _worker_init(epsilon: float, sim_dir: str) -> None:
     pass
 
 
-def _run_one(args: tuple[int, int, float, str, int]) -> EpisodeStats:
+def _run_one(args: tuple[int, int, float, str, int, Optional[str]]) -> EpisodeStats:
     """Top-level function (picklable) that runs one episode and saves it."""
-    idx, seed, epsilon, sim_dir, checkpoint_epoch = args
+    idx, seed, epsilon, sim_dir, checkpoint_epoch, sim_path_str = args
     net: Optional[ValueNet] = None
     net_obj = ValueNet()
-    sim_path = resolve_sim_checkpoint_path()
-    meta = load_if_exists(net_obj, str(sim_path)) if sim_path else None
+    meta = load_if_exists(net_obj, sim_path_str) if sim_path_str else None
     if meta is None:
         net = None
         policy_label = "random"
@@ -64,8 +64,14 @@ def run_simulations(
     sim_dir: str | None = None,
     workers: int | None = None,
     base_seed: int | None = None,
+    force_checkpoint: bool = False,
 ) -> dict:
     """Run N episodes, save each as a JSON file, and return aggregate stats.
+
+    When `force_checkpoint=True` the simulator loads CHECKPOINT_PATH (the
+    challenger) instead of BEST_CHECKPOINT_PATH (the champion); used by the
+    `run_loop` to run an evaluation round so a newly trained policy can earn
+    promotion to BEST.
 
     Returned dict:
         {
@@ -73,6 +79,7 @@ def run_simulations(
             "lengths": list[int],
             "truncated": int,
             "mean": float, "median": float, "max": int, "min": int,
+            "checkpoint_path": str | None,  # the checkpoint sim actually loaded
         }
     """
     n = num_simulations if num_simulations is not None else param.NUM_SIMULATIONS
@@ -84,14 +91,23 @@ def run_simulations(
     rng = random.Random(seed)
     seeds = [rng.randint(0, 2**31 - 1) for _ in range(n)]
 
-    # Load checkpoint metadata to know what epoch we're at
+    # Resolve which checkpoint sim should use ONCE, here, and thread it
+    # through to every worker.  This guarantees parent and workers (and the
+    # caller, via stats["checkpoint_path"]) all agree on the source even if
+    # files on disk change mid-round.
+    sim_path = resolve_sim_checkpoint_path(force_checkpoint=force_checkpoint)
+    sim_path_str: Optional[str] = str(sim_path) if sim_path else None
+
     net = ValueNet()
-    sim_path_meta = resolve_sim_checkpoint_path()
-    meta = load_if_exists(net, str(sim_path_meta)) if sim_path_meta else None
+    meta = load_if_exists(net, sim_path_str) if sim_path_str else None
     checkpoint_epoch = meta.get("epoch", 0) if meta else 0
 
+    role = "challenger (CHECKPOINT)" if force_checkpoint else "champion (BEST)"
+    src_name = Path(sim_path_str).name if sim_path_str else "random"
+    print(f"  Sim policy: {role}  → {src_name}")
+
     args_list = [
-        (i, seeds[i], eps, directory, checkpoint_epoch)
+        (i, seeds[i], eps, directory, checkpoint_epoch, sim_path_str)
         for i in range(n)
     ]
 
@@ -118,8 +134,7 @@ def run_simulations(
         policy_label = "random"
         ckpt_epoch = 0
         net_obj = ValueNet()
-        sim_path_single = resolve_sim_checkpoint_path()
-        meta_single = load_if_exists(net_obj, str(sim_path_single)) if sim_path_single else None
+        meta_single = load_if_exists(net_obj, sim_path_str) if sim_path_str else None
         if meta_single is not None:
             net_single = net_obj.to(param.DEVICE)
             net_single.eval()
@@ -149,6 +164,7 @@ def run_simulations(
         "median": statistics.median(scores) if scores else 0.0,
         "max": max(scores) if scores else 0,
         "min": min(scores) if scores else 0,
+        "checkpoint_path": sim_path_str,
     }
     print(
         f"  Score: mean={stats['mean']:.1f}  median={stats['median']:.1f}  "

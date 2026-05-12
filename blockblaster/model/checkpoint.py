@@ -55,16 +55,23 @@ def load_if_exists(
     return load(net, str(ckpt_path))
 
 
-def resolve_sim_checkpoint_path() -> Optional[Path]:
+def resolve_sim_checkpoint_path(force_checkpoint: bool = False) -> Optional[Path]:
     """Return the checkpoint path simulation should load this round.
 
-    Priority:
-      1. BEST_CHECKPOINT_PATH — exists after the first round that improved
-         the mean score.  Simulation always uses these stable best-mean weights
-         so the sim policy never regresses even as training advances.
-      2. CHECKPOINT_PATH — used on early rounds before any BEST snapshot exists.
-      3. None — no checkpoint at all (round 1 cold-start → random policy).
+    Champion / challenger:
+      - Normal round (`force_checkpoint=False`):
+          1. BEST_CHECKPOINT_PATH (champion) — used once a snapshot exists.
+          2. CHECKPOINT_PATH — fallback on early rounds before any BEST exists.
+          3. None — cold-start → random policy.
+      - Eval round (`force_checkpoint=True`):
+          1. CHECKPOINT_PATH (challenger) — newest trained weights, evaluated
+             head-to-head against the current champion; if its mean beats the
+             champion's it is promoted into BEST_CHECKPOINT_PATH.
+          2. None — CHECKPOINT does not exist yet (round 1).
     """
+    if force_checkpoint:
+        latest = Path(param.CHECKPOINT_PATH)
+        return latest if latest.exists() else None
     best = Path(param.BEST_CHECKPOINT_PATH)
     if best.exists():
         return best

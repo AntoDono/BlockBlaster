@@ -23,11 +23,12 @@ GAMMA: float = 0.99
 # ---------------------------------------------------------------------------
 NUM_SIMULATIONS: int = 500
 MAX_SIMULATIONS: int = 3000       # cap on total episodes kept; oldest are deleted when exceeded
-MAX_STEPS_PER_EPISODE: int = 3000 # hard cap per episode to prevent infinite games
+MAX_STEPS_PER_EPISODE: int = 6000 # hard cap per episode to prevent infinite games
 SIM_EPSILON: float = 0.2          # exploration rate during simulation
 SIM_WORKERS: int = 16              # >1 uses multiprocessing
 SIMULATIONS_DIR: str = "simulations"
 SIM_SEED: int = 42
+EVAL_INTERVAL: int = 3            # every Nth round, sim runs the CHECKPOINT (challenger) instead of BEST (champion); challenger promoted to BEST iff its mean beats the current best.
 
 # ---------------------------------------------------------------------------
 # Reward shaping (potential-based: F = gamma*Phi(s') - Phi(s))
@@ -44,7 +45,7 @@ SIM_SEED: int = 42
 # so reported scores remain the real game score.
 # ---------------------------------------------------------------------------
 POTENTIAL_COEFF: float = 0.07
-TRANSITIONS_COEFF: float = 0.1   # penalty on total row+col transitions (subtracted from Phi)
+TRANSITIONS_COEFF: float = 0.2   # penalty on total row+col transitions (subtracted from Phi)
 FITTABILITY_COEFF: float = 0.05  # weight on Σ |p| * num_legal_placements(p, board)
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ USE_DIHEDRAL_AUG: bool = True     # 8x augmentation via rotations + reflections
 # Training
 # ---------------------------------------------------------------------------
 NUM_EPOCHS: int = 5
-BATCH_SIZE: int = 512
+BATCH_SIZE: int = 1024
 LEARNING_RATE: float = 1e-4
 WEIGHT_DECAY: float = 3e-4
 TEST_SPLIT: float = 0.2           # fraction of episodes held out for test
@@ -82,7 +83,7 @@ HIDDEN_SIZE: int = 128
 # ---------------------------------------------------------------------------
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 CHECKPOINT_PATH: str = "checkpoints/value_net.pt"
-BEST_CHECKPOINT_PATH: str = "checkpoints/best_value_net.pt"  # active sim policy; sim always loads this (falls back to CHECKPOINT_PATH, then random). Promoted when mean score improves.
+BEST_CHECKPOINT_PATH: str = "checkpoints/best_value_net.pt"  # CHAMPION: sim loads this on normal rounds; CHECKPOINT_PATH is loaded every EVAL_INTERVAL rounds as challenger and promoted here iff it beats the champion's mean. Falls back to CHECKPOINT_PATH then random on early rounds before BEST exists.
 LOG_INTERVAL: int = 10
 
 

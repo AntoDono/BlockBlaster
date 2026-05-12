@@ -247,6 +247,51 @@ Checkpoints persist the Adam optimizer state (`exp_avg`, `exp_avg_sq`,
 survives across simulate → train rounds and the optimizer doesn't restart
 from zero momentum every iteration.
 
+### Champion / challenger checkpointing
+
+Two checkpoints are maintained in parallel:
+
+| File | Role |
+|------|------|
+| `checkpoints/value_net.pt`      | **Challenger** — the latest weights produced by `train()`; updated every round. |
+| `checkpoints/best_value_net.pt` | **Champion** — the stable policy used for data collection; only ever advances. |
+
+`run_loop.py` orchestrates a champion/challenger evaluation:
+
+```
+Normal round              (round % EVAL_INTERVAL != 0)
+    sim policy = champion (BEST_CHECKPOINT_PATH)
+    → episodes collected with the stable policy; best_mean_ever is NOT updated
+       even if the round's sample mean happens to exceed it (avoids drift from
+       sampling noise without an actual policy change).
+
+Eval round                (round % EVAL_INTERVAL == 0)
+    sim policy = challenger (CHECKPOINT_PATH, the freshly trained weights)
+    if mean(challenger) > best_mean_ever:
+        promote: copy CHECKPOINT_PATH → BEST_CHECKPOINT_PATH
+        best_mean_ever = mean(challenger)
+    else:
+        keep current champion
+```
+
+Early-round bootstrap: until BEST exists (typically round 1 cold-start →
+random policy, then a round or two of CHECKPOINT-only play), the resolver
+falls back to CHECKPOINT for normal rounds and `mean > -inf` is treated as
+the first promotion that seeds BEST.
+
+Why this design — without it, two failure modes are easy to hit:
+
+1. **Sim-from-latest only** — training instabilities propagate into the
+   data-collection policy and `mean` can collapse from e.g. 320 back down
+   to 60 over a few hundred rounds, even though earlier weights were good.
+2. **Sim-from-best only** — once BEST is set, the simulator never tries
+   the actively trained CHECKPOINT, so BEST is effectively frozen and the
+   loop stops improving.
+
+The eval round breaks both: most rounds use the stable champion so data
+quality doesn't regress, and every `EVAL_INTERVAL`th round gives the
+challenger a fair head-to-head shot at the title.
+
 ---
 
 ## Hyperparameters (`param.py`)
@@ -272,6 +317,7 @@ from zero momentum every iteration.
 | `SIM_WORKERS` | `8` | `>1` enables multiprocessing (always spawn-mode for CUDA safety) |
 | `SIMULATIONS_DIR` | `"simulations"` | Output folder for episode JSONs |
 | `SIM_SEED` | `42` | Seed for episode seed generation |
+| `EVAL_INTERVAL` | `5` | Every Nth round, sim loads CHECKPOINT (challenger) instead of BEST (champion); challenger is promoted iff its mean beats the champion's. |
 | `NUM_EPOCHS` | `50` | Training epochs per `train.py` run |
 | `BATCH_SIZE` | `256` | Minibatch size |
 | `LEARNING_RATE` | `1e-3` | Adam learning rate |
@@ -341,5 +387,5 @@ Opens a pygame window.  The agent auto-plays using the trained value network.
 | Path | Description |
 |------|-------------|
 | `simulations/ep_*.json` | Episode trajectories (git-ignored) |
-| `checkpoints/value_net.pt` | Latest training checkpoint — updated every train round (git-ignored) |
-| `checkpoints/best_value_net.pt` | Active simulation policy — promoted when sim mean improves; simulation always loads this (git-ignored) |
+| `checkpoints/value_net.pt` | **Challenger** — latest training checkpoint, updated every train round; loaded by sim on eval rounds (git-ignored) |
+| `checkpoints/best_value_net.pt` | **Champion** — stable simulation policy; loaded by sim on normal rounds; only updated when the challenger beats it in an eval round (git-ignored) |
