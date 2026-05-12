@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import param
+from blockblaster.model.checkpoint import resolve_sim_checkpoint_path
 from blockblaster.sim.runner import run_simulations
 from blockblaster.train.trainer import train
 
@@ -54,16 +55,17 @@ def main() -> None:
             f"mean={best_mean_ever:.1f} (round {best_mean_round})"
         )
 
-        # On a new best mean score, snapshot the checkpoint that just produced
-        # it BEFORE the next training step overwrites CHECKPOINT_PATH.  Gives
-        # us a recovery point when the simulate -> train loop drifts.
+        # On a new best mean score, promote the source sim used this round
+        # to BEST_CHECKPOINT_PATH so future sim rounds stay at this policy.
+        # Guard skips the copy when sim already loaded from BEST (src == dst).
         if new_best_mean:
-            src = Path(param.CHECKPOINT_PATH)
-            dst = Path(param.BEST_CHECKPOINT_PATH)
-            if src.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-                print(f"  New best mean → snapshotted to {dst}")
+            src_path = resolve_sim_checkpoint_path()
+            if src_path is not None:
+                dst = Path(param.BEST_CHECKPOINT_PATH)
+                if src_path.resolve() != dst.resolve():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst)
+                    print(f"  New best mean → snapshotted {src_path.name} to {dst}")
 
         # ── Train ───────────────────────────────────────────────────────
         print(f"\n[Round {round_num}] Training...")

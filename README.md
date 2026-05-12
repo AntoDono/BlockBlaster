@@ -341,4 +341,5 @@ Opens a pygame window.  The agent auto-plays using the trained value network.
 | Path | Description |
 |------|-------------|
 | `simulations/ep_*.json` | Episode trajectories (git-ignored) |
-| `checkpoints/value_net.pt` | Best model checkpoint (git-ignored) |
+| `checkpoints/value_net.pt` | Latest training checkpoint — updated every train round (git-ignored) |
+| `checkpoints/best_value_net.pt` | Active simulation policy — promoted when sim mean improves; simulation always loads this (git-ignored) |

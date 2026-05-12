@@ -22,7 +22,7 @@ GAMMA: float = 0.99
 # Simulation
 # ---------------------------------------------------------------------------
 NUM_SIMULATIONS: int = 500
-MAX_SIMULATIONS: int = 1000       # cap on total episodes kept; oldest are deleted when exceeded
+MAX_SIMULATIONS: int = 3000       # cap on total episodes kept; oldest are deleted when exceeded
 MAX_STEPS_PER_EPISODE: int = 3000 # hard cap per episode to prevent infinite games
 SIM_EPSILON: float = 0.2          # exploration rate during simulation
 SIM_WORKERS: int = 16              # >1 uses multiprocessing
@@ -45,14 +45,14 @@ SIM_SEED: int = 42
 # ---------------------------------------------------------------------------
 POTENTIAL_COEFF: float = 0.07
 TRANSITIONS_COEFF: float = 0.1   # penalty on total row+col transitions (subtracted from Phi)
-FITTABILITY_COEFF: float = 0.03  # weight on Σ |p| * num_legal_placements(p, board)
+FITTABILITY_COEFF: float = 0.05  # weight on Σ |p| * num_legal_placements(p, board)
 
 # ---------------------------------------------------------------------------
 # Policy lookahead
 # ---------------------------------------------------------------------------
 LOOKAHEAD_DEPTH: int = 3          # pieces to look ahead (= full queue); set to 1 for 1-step greedy
 LOOKAHEAD_MAX_BATCH: int = 4096   # max states per net forward pass (bounds GPU memory)
-BEAM_WIDTH: int = 5               # beams kept per depth during lookahead (larger = more exhaustive)
+BEAM_WIDTH: int = 10               # beams kept per depth during lookahead (larger = more exhaustive)
 
 
 # ---------------------------------------------------------------------------
@@ -74,15 +74,15 @@ SPLIT_SEED: int = 0
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
-CNN_CHANNELS: int = 64
-HIDDEN_SIZE: int = 512
+CNN_CHANNELS: int = 16
+HIDDEN_SIZE: int = 128
 
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 CHECKPOINT_PATH: str = "checkpoints/value_net.pt"
-BEST_CHECKPOINT_PATH: str = "checkpoints/best_value_net.pt"  # snapshot of weights that produced the best mean score across simulate->train rounds
+BEST_CHECKPOINT_PATH: str = "checkpoints/best_value_net.pt"  # active sim policy; sim always loads this (falls back to CHECKPOINT_PATH, then random). Promoted when mean score improves.
 LOG_INTERVAL: int = 10
 
 

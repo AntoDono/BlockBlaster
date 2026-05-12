@@ -53,3 +53,22 @@ def load_if_exists(
     if not ckpt_path.exists():
         return None
     return load(net, str(ckpt_path))
+
+
+def resolve_sim_checkpoint_path() -> Optional[Path]:
+    """Return the checkpoint path simulation should load this round.
+
+    Priority:
+      1. BEST_CHECKPOINT_PATH — exists after the first round that improved
+         the mean score.  Simulation always uses these stable best-mean weights
+         so the sim policy never regresses even as training advances.
+      2. CHECKPOINT_PATH — used on early rounds before any BEST snapshot exists.
+      3. None — no checkpoint at all (round 1 cold-start → random policy).
+    """
+    best = Path(param.BEST_CHECKPOINT_PATH)
+    if best.exists():
+        return best
+    latest = Path(param.CHECKPOINT_PATH)
+    if latest.exists():
+        return latest
+    return None

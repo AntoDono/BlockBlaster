@@ -10,7 +10,7 @@ from typing import Optional
 from tqdm import tqdm
 
 import param
-from blockblaster.model.checkpoint import load_if_exists
+from blockblaster.model.checkpoint import load_if_exists, resolve_sim_checkpoint_path
 from blockblaster.model.value_net import ValueNet
 from blockblaster.sim.io import list_episodes, write_episode
 from blockblaster.sim.rollout import run_episode
@@ -31,7 +31,8 @@ def _run_one(args: tuple[int, int, float, str, int]) -> EpisodeStats:
     idx, seed, epsilon, sim_dir, checkpoint_epoch = args
     net: Optional[ValueNet] = None
     net_obj = ValueNet()
-    meta = load_if_exists(net_obj, param.CHECKPOINT_PATH)
+    sim_path = resolve_sim_checkpoint_path()
+    meta = load_if_exists(net_obj, str(sim_path)) if sim_path else None
     if meta is None:
         net = None
         policy_label = "random"
@@ -85,7 +86,8 @@ def run_simulations(
 
     # Load checkpoint metadata to know what epoch we're at
     net = ValueNet()
-    meta = load_if_exists(net)
+    sim_path_meta = resolve_sim_checkpoint_path()
+    meta = load_if_exists(net, str(sim_path_meta)) if sim_path_meta else None
     checkpoint_epoch = meta.get("epoch", 0) if meta else 0
 
     args_list = [
@@ -116,7 +118,8 @@ def run_simulations(
         policy_label = "random"
         ckpt_epoch = 0
         net_obj = ValueNet()
-        meta_single = load_if_exists(net_obj)
+        sim_path_single = resolve_sim_checkpoint_path()
+        meta_single = load_if_exists(net_obj, str(sim_path_single)) if sim_path_single else None
         if meta_single is not None:
             net_single = net_obj.to(param.DEVICE)
             net_single.eval()
