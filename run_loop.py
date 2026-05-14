@@ -27,8 +27,8 @@ def main() -> None:
 
     best_score_ever = 0
     best_score_round = 0
-    best_mean_ever = float("-inf")
-    best_mean_round = 0
+    best_median_ever = float("-inf")
+    best_median_round = 0
 
     for round_num in range(1, args.rounds + 1):
         divider = "=" * 50
@@ -56,8 +56,10 @@ def main() -> None:
         # That's the case on (a) eval rounds (forced CHECKPOINT), and
         # (b) early normal rounds before BEST exists (resolver falls back
         # to CHECKPOINT).  When sim used BEST itself, we deliberately do
-        # NOT update best_mean_ever — that prevents sampling noise from
+        # NOT update best_median_ever — that prevents sampling noise from
         # ratcheting the champion's bar upward without a real promotion.
+        # We compare on MEDIAN (not mean) so a single lucky max-score
+        # episode can't tip the decision.
         sim_source = stats.get("checkpoint_path")
         src_path = Path(sim_source) if sim_source else None
         dst_path = Path(param.BEST_CHECKPOINT_PATH)
@@ -66,26 +68,26 @@ def main() -> None:
         )
 
         if promotion_eligible:
-            if stats["mean"] > best_mean_ever:
-                prev_best = best_mean_ever
-                best_mean_ever = stats["mean"]
-                best_mean_round = round_num
+            if stats["median"] > best_median_ever:
+                prev_best = best_median_ever
+                best_median_ever = stats["median"]
+                best_median_round = round_num
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src_path, dst_path)
                 prev_str = "−∞" if prev_best == float("-inf") else f"{prev_best:.1f}"
                 print(
-                    f"  Challenger WON ({stats['mean']:.1f} > {prev_str}) "
+                    f"  Challenger WON (median {stats['median']:.1f} > {prev_str}) "
                     f"→ promoted {src_path.name} to {dst_path.name}"
                 )
             elif is_eval_round:
                 print(
-                    f"  Challenger LOST ({stats['mean']:.1f} ≤ {best_mean_ever:.1f}); "
+                    f"  Challenger LOST (median {stats['median']:.1f} ≤ {best_median_ever:.1f}); "
                     f"champion ({dst_path.name}) retained"
                 )
 
         print(
             f"  Best ever: max={best_score_ever} (round {best_score_round})  "
-            f"mean={best_mean_ever:.1f} (round {best_mean_round})"
+            f"median={best_median_ever:.1f} (round {best_median_round})"
         )
 
         # ── Train ───────────────────────────────────────────────────────
@@ -98,10 +100,10 @@ def main() -> None:
     print(f"Loop complete after {args.rounds} round(s).")
     print(f"Latest checkpoint:  {param.CHECKPOINT_PATH}")
     if Path(param.BEST_CHECKPOINT_PATH).exists():
-        print(f"Best-mean snapshot: {param.BEST_CHECKPOINT_PATH}  (mean={best_mean_ever:.1f}, round {best_mean_round})")
+        print(f"Best-median snapshot: {param.BEST_CHECKPOINT_PATH}  (median={best_median_ever:.1f}, round {best_median_round})")
     print(
         f"Best score ever: {best_score_ever} (round {best_score_round})  |  "
-        f"Best mean score: {best_mean_ever:.1f} (round {best_mean_round})"
+        f"Best median score: {best_median_ever:.1f} (round {best_median_round})"
     )
     print(f"{'=' * 50}")
 

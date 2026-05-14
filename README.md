@@ -261,29 +261,34 @@ Two checkpoints are maintained in parallel:
 ```
 Normal round              (round % EVAL_INTERVAL != 0)
     sim policy = champion (BEST_CHECKPOINT_PATH)
-    → episodes collected with the stable policy; best_mean_ever is NOT updated
-       even if the round's sample mean happens to exceed it (avoids drift from
-       sampling noise without an actual policy change).
+    → episodes collected with the stable policy; best_median_ever is NOT
+       updated even if the round's sample median happens to exceed it
+       (avoids drift from sampling noise without an actual policy change).
 
 Eval round                (round % EVAL_INTERVAL == 0)
     sim policy = challenger (CHECKPOINT_PATH, the freshly trained weights)
-    if mean(challenger) > best_mean_ever:
+    if median(challenger) > best_median_ever:
         promote: copy CHECKPOINT_PATH → BEST_CHECKPOINT_PATH
-        best_mean_ever = mean(challenger)
+        best_median_ever = median(challenger)
     else:
         keep current champion
 ```
 
+We compare on **median**, not mean: a single unusually-long lucky episode
+can drag the mean far above typical play, and we don't want one tail
+event tipping a promotion decision. Median is the typical-game score.
+
 Early-round bootstrap: until BEST exists (typically round 1 cold-start →
 random policy, then a round or two of CHECKPOINT-only play), the resolver
-falls back to CHECKPOINT for normal rounds and `mean > -inf` is treated as
-the first promotion that seeds BEST.
+falls back to CHECKPOINT for normal rounds and `median > -inf` is treated
+as the first promotion that seeds BEST.
 
 Why this design — without it, two failure modes are easy to hit:
 
 1. **Sim-from-latest only** — training instabilities propagate into the
-   data-collection policy and `mean` can collapse from e.g. 320 back down
-   to 60 over a few hundred rounds, even though earlier weights were good.
+   data-collection policy and `median` can collapse from e.g. 320 back
+   down to 60 over a few hundred rounds, even though earlier weights were
+   good.
 2. **Sim-from-best only** — once BEST is set, the simulator never tries
    the actively trained CHECKPOINT, so BEST is effectively frozen and the
    loop stops improving.
@@ -317,7 +322,7 @@ challenger a fair head-to-head shot at the title.
 | `SIM_WORKERS` | `8` | `>1` enables multiprocessing (always spawn-mode for CUDA safety) |
 | `SIMULATIONS_DIR` | `"simulations"` | Output folder for episode JSONs |
 | `SIM_SEED` | `42` | Seed for episode seed generation |
-| `EVAL_INTERVAL` | `5` | Every Nth round, sim loads CHECKPOINT (challenger) instead of BEST (champion); challenger is promoted iff its mean beats the champion's. |
+| `EVAL_INTERVAL` | `5` | Every Nth round, sim loads CHECKPOINT (challenger) instead of BEST (champion); challenger is promoted iff its median beats the champion's. |
 | `NUM_EPOCHS` | `50` | Training epochs per `train.py` run |
 | `BATCH_SIZE` | `256` | Minibatch size |
 | `LEARNING_RATE` | `1e-3` | Adam learning rate |
