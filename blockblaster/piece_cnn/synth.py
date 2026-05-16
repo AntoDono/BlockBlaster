@@ -239,7 +239,7 @@ def pregenerate_dataset(
     empty_fraction: float = 1 / NUM_CLASSES,
     chunk_size: int = 512,
     seed: int = 0,
-    progress: bool = True,
+    desc: str = "pregen",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Render `n_samples` synthetic images in parallel and return them in RAM.
 
@@ -247,16 +247,18 @@ def pregenerate_dataset(
         n_samples:      how many examples to generate in total.
         n_workers:      parallel processes (1 = serial, in-process).
         empty_fraction: fraction of samples that are empty slots.
-        chunk_size:     samples per worker task; smaller = better progress
-                        granularity, larger = lower IPC overhead.
+        chunk_size:     samples per worker task; smaller = finer progress
+                        updates, larger = lower IPC overhead.
         seed:           base seed for reproducibility (each chunk gets a
                         derived seed so workers don't produce identical data).
-        progress:       print a one-line progress message per chunk.
+        desc:           label shown on the tqdm progress bar.
 
     Returns:
         (images, labels) where images is uint8 ``(N, INPUT_SIZE, INPUT_SIZE, 3)``
         and labels is int64 ``(N,)``.
     """
+    from tqdm import tqdm
+
     n_chunks = (n_samples + chunk_size - 1) // chunk_size
     tasks = [
         (seed + i, min(chunk_size, n_samples - i * chunk_size), empty_fraction)
@@ -265,48 +267,28 @@ def pregenerate_dataset(
 
     images = np.empty((n_samples, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     labels = np.empty((n_samples,), dtype=np.int64)
-
-    import time
-    t0 = time.time()
     written = 0
 
     if n_workers <= 1:
-        for ci, args in enumerate(tasks):
-            imgs, lbls = _worker_chunk(args)
-            n = len(imgs)
-            images[written : written + n] = imgs
-            labels[written : written + n] = lbls
-            written += n
-            if progress:
-                _print_progress(written, n_samples, t0)
+        iterator = (_worker_chunk(args) for args in tasks)
     else:
         # Use spawn explicitly — safer than fork when CUDA is initialised.
         from multiprocessing import get_context
         ctx = get_context("spawn")
-        with ctx.Pool(processes=n_workers) as pool:
-            for ci, (imgs, lbls) in enumerate(pool.imap_unordered(_worker_chunk, tasks)):
+        pool = ctx.Pool(processes=n_workers)
+        iterator = pool.imap_unordered(_worker_chunk, tasks)
+
+    try:
+        with tqdm(total=n_samples, desc=desc, unit="img", leave=False) as bar:
+            for imgs, lbls in iterator:
                 n = len(imgs)
                 images[written : written + n] = imgs
                 labels[written : written + n] = lbls
                 written += n
-                if progress:
-                    _print_progress(written, n_samples, t0)
-
-    if progress:
-        elapsed = time.time() - t0
-        print(f"  pregenerated {n_samples:,} samples in {elapsed:.1f}s "
-              f"({n_samples/elapsed:.0f} samples/s)")
+                bar.update(n)
+    finally:
+        if n_workers > 1:
+            pool.close()
+            pool.join()
 
     return images, labels
-
-
-def _print_progress(written: int, total: int, t0: float) -> None:
-    import time
-    pct = 100.0 * written / total
-    rate = written / max(time.time() - t0, 1e-6)
-    eta = (total - written) / max(rate, 1e-6)
-    print(f"  pregen {written:>7,}/{total:,}  ({pct:5.1f}%)  "
-          f"rate={rate:>5.0f}/s  eta={eta:5.1f}s",
-          end="\r", flush=True)
-    if written >= total:
-        print()  # newline after final update

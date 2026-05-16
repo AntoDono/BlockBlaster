@@ -21,6 +21,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
+from tqdm import tqdm
 
 from blockblaster.piece_cnn import (
     DEFAULT_WEIGHT_PATH,
@@ -69,10 +70,10 @@ def main() -> None:
           f"on {NUM_WORKERS} workers")
     t0 = time.time()
     train_imgs, train_lbls = pregenerate_dataset(
-        NUM_TRAIN_SAMPLES, n_workers=NUM_WORKERS, seed=0, progress=True,
+        NUM_TRAIN_SAMPLES, n_workers=NUM_WORKERS, seed=0, desc="  train pregen",
     )
     val_imgs, val_lbls = pregenerate_dataset(
-        NUM_VAL_SAMPLES, n_workers=NUM_WORKERS, seed=10**7, progress=True,
+        NUM_VAL_SAMPLES, n_workers=NUM_WORKERS, seed=10**7, desc="    val pregen",
     )
     print(f"[phase 1] dataset ready in {time.time() - t0:.1f}s "
           f"(RAM: {(train_imgs.nbytes + val_imgs.nbytes) / 1e6:.0f} MB)")
@@ -98,14 +99,21 @@ def main() -> None:
     best_acc = 0.0
     train_t0 = time.time()
     for epoch in range(1, NUM_EPOCHS + 1):
-        # Shuffle each epoch
         perm = torch.randperm(n_train, device=device)
+        batch_starts = list(range(0, n_train, BATCH_SIZE))
 
         epoch_loss = 0.0
         epoch_correct = 0
         n_batches = 0
         ep_t0 = time.time()
-        for i in range(0, n_train, BATCH_SIZE):
+
+        bar = tqdm(
+            batch_starts,
+            desc=f"  Epoch {epoch:>2d}/{NUM_EPOCHS}",
+            leave=False,
+            unit="batch",
+        )
+        for i in bar:
             idx = perm[i : i + BATCH_SIZE]
             x = train_x[idx]
             y = train_y[idx]
@@ -116,9 +124,15 @@ def main() -> None:
             loss.backward()
             opt.step()
 
-            epoch_loss   += loss.item()
-            epoch_correct += (logits.argmax(dim=1) == y).sum().item()
-            n_batches    += 1
+            epoch_loss    += loss.item()
+            batch_correct  = (logits.argmax(dim=1) == y).sum().item()
+            epoch_correct += batch_correct
+            n_batches     += 1
+
+            bar.set_postfix(
+                loss=f"{loss.item():.3f}",
+                acc=f"{batch_correct / len(y):.3f}",
+            )
 
         train_acc = epoch_correct / n_train
         val_acc   = _eval(net, val_x, val_y, batch=BATCH_SIZE)
@@ -130,8 +144,7 @@ def main() -> None:
             torch.save(net.state_dict(), out_path)
             flag = "  ↳ saved"
 
-        print(f"  epoch {epoch:2d}/{NUM_EPOCHS}  "
-              f"loss={epoch_loss / n_batches:.4f}  "
+        print(f"  Epoch {epoch:>2d}  loss={epoch_loss / n_batches:.4f}  "
               f"train_acc={train_acc:.4f}  val_acc={val_acc:.4f}  "
               f"({ep_time:.1f}s){flag}")
 
