@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import pygame
 
+from blockblaster.assist.advisor import Suggestion
 from blockblaster.assist.calibration import CalibrationBox
 from blockblaster.game.board import Board
 from blockblaster.game.pieces import Piece
@@ -36,6 +37,9 @@ OVERLAY_DOT     = (255, 255, 100)    # cell-centre dots (grid)
 DRAG_COLOR      = (255, 200, 0)      # drag-in-progress rect
 QUEUE_BOX_COLOR = (255, 210, 50)     # yellow bounding box (queue)
 QUEUE_DIVIDER   = (200, 165, 40)     # vertical dividers between piece slots
+SUGGEST_FILL    = ( 80, 240, 120)    # ghost-piece fill (suggested placement)
+SUGGEST_BORDER  = ( 40, 200,  80)    # ghost-piece border
+SUGGEST_FILL_A  = 170                # alpha for ghost-piece fill
 
 
 # ── Frame → surface ───────────────────────────────────────────────────────────
@@ -73,11 +77,16 @@ def draw_phone_panel(
     error_msg: Optional[str],
     font: pygame.font.Font,
     small_font: pygame.font.Font,
+    cached_surface: Optional[tuple[pygame.Surface, float, int, int]] = None,
 ) -> tuple[float, int, int]:
     """Draw the left phone-screen panel.
 
     Returns (scale, blit_x, blit_y) so callers can map mouse coordinates back
     to frame pixel coordinates.  When no frame is available, returns (1.0, 0, 0).
+
+    If ``cached_surface`` is provided, skip the cv2 resize / colour-convert /
+    pygame buffer copy and reuse the previous result.  The caller is
+    responsible for invalidating the cache when the frame changes.
     """
     # Background + border
     pygame.draw.rect(screen, PANEL_BG, rect, border_radius=10)
@@ -90,7 +99,10 @@ def draw_phone_panel(
     content_rect = pygame.Rect(rect.x + 4, rect.y + 30, rect.width - 8, rect.height - 38)
 
     if frame is not None:
-        surf, scale, blit_x, blit_y = bgr_to_surface(frame, content_rect)
+        if cached_surface is not None:
+            surf, scale, blit_x, blit_y = cached_surface
+        else:
+            surf, scale, blit_x, blit_y = bgr_to_surface(frame, content_rect)
         screen.blit(surf, (blit_x, blit_y))
         return scale, blit_x, blit_y
     else:
@@ -113,8 +125,13 @@ def draw_recon_panel(
     queue: list[Piece],
     font: pygame.font.Font,
     small_font: pygame.font.Font,
+    suggestion: Optional[Suggestion] = None,
 ) -> None:
-    """Draw the right reconstructed game-state panel."""
+    """Draw the right reconstructed game-state panel.
+
+    If ``suggestion`` is provided, the recommended piece is highlighted in
+    the mini queue and rendered as a ghost overlay on the board.
+    """
     pygame.draw.rect(screen, PANEL_BG, rect, border_radius=10)
     pygame.draw.rect(screen, PANEL_BORDER, rect, width=2, border_radius=10)
 
@@ -130,12 +147,29 @@ def draw_recon_panel(
 
     draw_board(screen, board, board_x, board_y)
 
+    if suggestion is not None:
+        _draw_ghost_piece_on_board(screen, suggestion, board_x, board_y)
+
     # Queue panel (minimal, re-implementing draw_queue inline at smaller scale)
     qx = board_x + board_px + 12
-    _draw_mini_queue(screen, queue, qx, board_y, board_px, small_font)
+    chosen_slot = suggestion.slot if suggestion is not None else None
+    _draw_mini_queue(
+        screen, queue, qx, board_y, board_px, small_font,
+        chosen_slot=chosen_slot,
+    )
 
     # Caption at the bottom
-    caption = small_font.render("drag on phone panel to calibrate grid", True, DIM_TEXT)
+    if suggestion is not None:
+        caption_text = (
+            f"suggested: {suggestion.piece.name} at "
+            f"row {suggestion.row + 1}, col {suggestion.col + 1} "
+            f"(slot {suggestion.slot + 1})"
+        )
+        caption_col = SUGGEST_FILL
+    else:
+        caption_text = "drag on phone panel to calibrate grid"
+        caption_col = DIM_TEXT
+    caption = small_font.render(caption_text, True, caption_col)
     screen.blit(caption, (rect.centerx - caption.get_width() // 2, rect.bottom - 26))
 
 
@@ -205,8 +239,13 @@ def draw_queue_overlay(
     blit_x: int,
     blit_y: int,
     font: pygame.font.Font,
+    chosen_slot: Optional[int] = None,
 ) -> None:
-    """Draw the queue bounding box divided into 3 labeled piece slots."""
+    """Draw the queue bounding box divided into 3 labeled piece slots.
+
+    If ``chosen_slot`` is set, that slot is filled and outlined in the
+    suggestion colour so the user can see which piece to drag.
+    """
     sr = box.to_screen_rect(scale, blit_x, blit_y)
 
     # Outer bounding box in yellow
@@ -218,14 +257,57 @@ def draw_queue_overlay(
         x = int(sr.x + i * slot_w)
         pygame.draw.line(screen, QUEUE_DIVIDER, (x, sr.y), (x, sr.bottom), 1)
 
+    # Highlight the chosen slot (translucent fill + thick border)
+    if chosen_slot is not None and 0 <= chosen_slot < 3:
+        slot_rect = pygame.Rect(
+            int(sr.x + chosen_slot * slot_w), sr.y,
+            int(slot_w) + 1, sr.height,
+        )
+        overlay = pygame.Surface(slot_rect.size, pygame.SRCALPHA)
+        overlay.fill((*SUGGEST_FILL, 70))
+        screen.blit(overlay, slot_rect.topleft)
+        pygame.draw.rect(screen, SUGGEST_BORDER, slot_rect, width=3)
+
     # Slot labels "P1", "P2", "P3" centred in each column
     for i in range(3):
-        label_surf = font.render(f"P{i + 1}", True, QUEUE_BOX_COLOR)
+        col = SUGGEST_FILL if i == chosen_slot else QUEUE_BOX_COLOR
+        label_surf = font.render(f"P{i + 1}", True, col)
         lx = int(sr.x + (i + 0.5) * slot_w) - label_surf.get_width() // 2
         ly = sr.y - label_surf.get_height() - 2
         # Keep label inside the screen
         ly = max(0, ly)
         screen.blit(label_surf, (lx, ly))
+
+
+def draw_suggestion_on_phone(
+    screen: pygame.Surface,
+    grid_box: CalibrationBox,
+    suggestion: Suggestion,
+    scale: float,
+    blit_x: int,
+    blit_y: int,
+) -> None:
+    """Overlay the suggested placement onto the calibrated phone grid.
+
+    Draws a translucent ghost piece at the suggested (row, col) inside the
+    calibrated 8×8 grid box so the user can see exactly where to drop it.
+    """
+    sr = grid_box.to_screen_rect(scale, blit_x, blit_y)
+    cell_w = sr.width / 8
+    cell_h = sr.height / 8
+    for dr, dc in suggestion.piece.cells:
+        r = suggestion.row + dr
+        c = suggestion.col + dc
+        if not (0 <= r < 8 and 0 <= c < 8):
+            continue
+        cx = sr.x + c * cell_w
+        cy = sr.y + r * cell_h
+        rect = pygame.Rect(int(cx) + 1, int(cy) + 1,
+                           int(cell_w) - 2, int(cell_h) - 2)
+        overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+        overlay.fill((*SUGGEST_FILL, SUGGEST_FILL_A))
+        screen.blit(overlay, rect.topleft)
+        pygame.draw.rect(screen, SUGGEST_BORDER, rect, width=2)
 
 
 def draw_drag_preview(
@@ -272,8 +354,13 @@ def _draw_mini_queue(
     y0: int,
     panel_h: int,
     small_font: pygame.font.Font,
+    chosen_slot: Optional[int] = None,
 ) -> None:
-    """Minimal queue preview in the recon panel."""
+    """Minimal queue preview in the recon panel.
+
+    When ``chosen_slot`` is set, that slot gets a tinted background and a
+    thick suggestion-coloured border so the recommended piece stands out.
+    """
     from blockblaster.gui.render import QUEUE_BG, QUEUE_BORDER, DIM_TEXT as GUI_DIM
 
     qw = QUEUE_WIDTH - 10
@@ -291,10 +378,53 @@ def _draw_mini_queue(
     slot_h = (panel_h - 30) // max(len(queue), 1)
     for i, piece in enumerate(queue):
         sy = y0 + 30 + i * slot_h
-        num = small_font.render(f"#{i + 1}", True, GUI_DIM)
+
+        if i == chosen_slot:
+            slot_rect = pygame.Rect(x0 + 4, sy - 4, qw - 8, slot_h - 2)
+            overlay = pygame.Surface(slot_rect.size, pygame.SRCALPHA)
+            overlay.fill((*SUGGEST_FILL, 60))
+            surface.blit(overlay, slot_rect.topleft)
+            pygame.draw.rect(surface, SUGGEST_BORDER, slot_rect,
+                             width=2, border_radius=6)
+
+        label_col = SUGGEST_FILL if i == chosen_slot else GUI_DIM
+        num = small_font.render(f"#{i + 1}", True, label_col)
         surface.blit(num, (x0 + 8, sy))
+        if piece is None:
+            dash = small_font.render("—", True, GUI_DIM)
+            surface.blit(
+                dash,
+                (x0 + qw // 2 - dash.get_width() // 2, sy + 18),
+            )
+            continue
+        piece_color = (
+            SUGGEST_FILL if i == chosen_slot
+            else PIECE_COLORS[i % len(PIECE_COLORS)]
+        )
         draw_piece_preview(
             surface, piece,
             x0 + 10, sy + 18,
-            color=PIECE_COLORS[i % len(PIECE_COLORS)],
+            color=piece_color,
         )
+
+
+def _draw_ghost_piece_on_board(
+    surface: pygame.Surface,
+    suggestion: Suggestion,
+    board_x: int,
+    board_y: int,
+) -> None:
+    """Overlay the suggested piece on the reconstructed 8×8 board."""
+    for dr, dc in suggestion.piece.cells:
+        r = suggestion.row + dr
+        c = suggestion.col + dc
+        if not (0 <= r < 8 and 0 <= c < 8):
+            continue
+        cx = board_x + c * CELL_SIZE
+        cy = board_y + r * CELL_SIZE
+        rect = pygame.Rect(cx + 2, cy + 2, CELL_SIZE - 4, CELL_SIZE - 4)
+        overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+        overlay.fill((*SUGGEST_FILL, SUGGEST_FILL_A))
+        surface.blit(overlay, rect.topleft)
+        pygame.draw.rect(surface, SUGGEST_BORDER, rect,
+                         width=3, border_radius=5)

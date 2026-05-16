@@ -18,7 +18,7 @@ if str(_DEVICES_DIR) not in sys.path:
 
 from get_frame import get_frame, open_device_stream  # type: ignore[import]
 
-TARGET_FPS = 15
+TARGET_FPS = 30
 _FRAME_DT = 1.0 / TARGET_FPS
 
 
@@ -32,6 +32,7 @@ class DeviceStream:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._frame: Optional[np.ndarray] = None
+        self._frame_id: int = 0
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
@@ -61,6 +62,15 @@ class DeviceStream:
         with self._lock:
             return self._frame
 
+    def get_latest_with_id(self) -> tuple[Optional[np.ndarray], int]:
+        """Return ``(frame, frame_id)``; ``frame_id`` increments on every new capture.
+
+        Use the id to detect whether the frame has actually changed since the
+        last call (much cheaper than comparing pixel data).
+        """
+        with self._lock:
+            return self._frame, self._frame_id
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -82,6 +92,7 @@ class DeviceStream:
                     if frame is not None:
                         with self._lock:
                             self._frame = frame
+                            self._frame_id += 1
 
                     next_deadline += _FRAME_DT
                     sleep_for = next_deadline - asyncio.get_event_loop().time()
