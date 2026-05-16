@@ -58,6 +58,7 @@ def run() -> None:
 
     board = Board()
     queue: list = []
+    queue_confidences: list[float] = []
 
     # Load persisted calibration (both slots)
     cfg = CalibrationConfig.load()
@@ -159,7 +160,9 @@ def run() -> None:
             if cfg.grid is not None and cfg.grid.is_valid():
                 board.grid = scan_board(frame, cfg.grid)
             if cfg.queue is not None and cfg.queue.is_valid():
-                queue = recognizer.recognize_queue(frame, cfg.queue)
+                results = recognizer.recognize_queue_with_confidence(frame, cfg.queue)
+                queue = [p for p, _ in results]
+                queue_confidences = [c for _, c in results]
             last_processed_frame_id = frame_id
 
         # ── Advisor (cached on board + queue) ────────────────────────────
@@ -220,6 +223,7 @@ def run() -> None:
             font=font,
             small_font=small_font,
             suggestion=suggestion,
+            queue_confidences=queue_confidences,
         )
 
         # Build status hint showing active mode

@@ -126,6 +126,7 @@ def draw_recon_panel(
     font: pygame.font.Font,
     small_font: pygame.font.Font,
     suggestion: Optional[Suggestion] = None,
+    queue_confidences: Optional[list[float]] = None,
 ) -> None:
     """Draw the right reconstructed game-state panel.
 
@@ -156,6 +157,7 @@ def draw_recon_panel(
     _draw_mini_queue(
         screen, queue, qx, board_y, board_px, small_font,
         chosen_slot=chosen_slot,
+        confidences=queue_confidences,
     )
 
     # Caption at the bottom
@@ -355,11 +357,16 @@ def _draw_mini_queue(
     panel_h: int,
     small_font: pygame.font.Font,
     chosen_slot: Optional[int] = None,
+    confidences: Optional[list[float]] = None,
 ) -> None:
     """Minimal queue preview in the recon panel.
 
     When ``chosen_slot`` is set, that slot gets a tinted background and a
     thick suggestion-coloured border so the recommended piece stands out.
+
+    If ``confidences`` is provided, each slot's per-slot probability is
+    rendered next to the ``#i`` label and colour-coded:
+        green  ≥ 0.90,  yellow 0.70–0.90,  red < 0.70.
     """
     from blockblaster.gui.render import QUEUE_BG, QUEUE_BORDER, DIM_TEXT as GUI_DIM
 
@@ -390,6 +397,13 @@ def _draw_mini_queue(
         label_col = SUGGEST_FILL if i == chosen_slot else GUI_DIM
         num = small_font.render(f"#{i + 1}", True, label_col)
         surface.blit(num, (x0 + 8, sy))
+
+        conf = confidences[i] if confidences is not None and i < len(confidences) else None
+        if conf is not None:
+            conf_col = _confidence_color(conf)
+            conf_surf = small_font.render(f"p={conf:.2f}", True, conf_col)
+            surface.blit(conf_surf, (x0 + qw - conf_surf.get_width() - 8, sy))
+
         if piece is None:
             dash = small_font.render("—", True, GUI_DIM)
             surface.blit(
@@ -406,6 +420,15 @@ def _draw_mini_queue(
             x0 + 10, sy + 18,
             color=piece_color,
         )
+
+
+def _confidence_color(conf: float) -> tuple[int, int, int]:
+    """Traffic-light colour for a probability in [0, 1]."""
+    if conf >= 0.90:
+        return (90, 220, 110)    # green — confident
+    if conf >= 0.70:
+        return (240, 210, 80)    # yellow — meh
+    return (235, 90, 90)         # red — likely wrong
 
 
 def _draw_ghost_piece_on_board(

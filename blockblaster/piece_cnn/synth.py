@@ -27,12 +27,21 @@ EMPTY_CLASS_ID = NUM_PIECES            # class index for "empty slot"
 NUM_CLASSES   = NUM_PIECES + 1
 INPUT_SIZE    = 96                     # the CNN works on 96×96 RGB crops
 
-# Default canvas sizes (slot dimensions before resize).  We render at
-# higher resolution and rely on the resize-to-INPUT_SIZE step to bake in
-# realistic anti-aliasing.
-SLOT_W_RANGE  = (120, 260)
-SLOT_H_RANGE  = (120, 260)
-CELL_PX_RANGE = (16, 38)               # cell pitch in pixels
+# Slot canvas sizes (before resize to INPUT_SIZE).  Real Block Blast
+# queue slots are taller than wide — measured ≈ 349×448 (aspect w/h ≈
+# 0.78) in our reference captures.  Render at higher resolution so the
+# final downsample to INPUT_SIZE bakes in realistic anti-aliasing, and
+# bias the aspect ratio toward tall slots so resized cells aren't square
+# when the model only ever sees vertically-squished real crops.
+SLOT_HEIGHT_RANGE    = (220, 460)
+SLOT_ASPECT_WH_RANGE = (0.55, 1.05)    # slot_w / slot_h
+
+# Fraction of the slot's *shorter* dimension that the piece's longest
+# axis should fill.  Real pieces sit in a lot of padding — typically
+# only 40–55% of the slot's short side.  Sampling this lets the model
+# see a wide range of piece-vs-padding ratios.
+PIECE_SIZE_FRAC_RANGE = (0.30, 0.65)
+MIN_CELL_PX           = 10             # never go below this even for big pieces
 
 # Background colour — sampled per-image across a wide HSV range so the
 # classifier doesn't lock onto "dark navy" as part of the piece signature.
@@ -63,18 +72,24 @@ MULTI_COLOR_PROB    = 0.20             # chance every cell is independently colo
 ROTATION_JITTER_DEG = 7.0              # ±degrees
 SHEAR_JITTER        = 0.06             # ±shear factor
 
-# Drop-shadow rendering — real Block Blast pieces cast a soft dark shadow
-# to the bottom-right.  Without this in training data the CNN gets
-# confused on low-contrast pieces (the shadow looks like extra ghost
-# cells of the piece).
-SHADOW_PROB         = 0.85             # chance to render a drop shadow at all
-SHADOW_OFFSET_FRAC  = (0.08, 0.22)     # offset as a fraction of cell pitch
-SHADOW_ALPHA_RANGE  = (0.18, 0.45)     # darkness of the shadow (0=none, 1=black)
-SHADOW_BLUR_FRAC    = (0.10, 0.35)     # gaussian blur sigma as fraction of cell pitch
+# Drop-shadow rendering — real Block Blast pieces cast a *subtle* soft
+# shadow to the bottom-right (much fainter than my first pass: alpha ≈
+# 0.10–0.25, small offset, light blur).
+SHADOW_PROB         = 0.9
+SHADOW_OFFSET_FRAC  = (0.05, 0.18)     # offset as a fraction of cell pitch
+SHADOW_ALPHA_RANGE  = (0.10, 0.28)
+SHADOW_BLUR_FRAC    = (0.08, 0.22)
 
-# Realistic gradient-fill bevel (a smoother alternative to the line-based
-# bevel).  Mixed in randomly so the model sees both rendering styles.
-GRADIENT_BEVEL_PROB = 0.5
+# Real game cells are drawn with a smooth top→bottom gradient (light
+# half on top, dark half on bottom).  Make this the dominant style.
+GRADIENT_BEVEL_PROB = 0.85
+
+# Cell border — the real game uses a *thin* border that is a darker
+# shade of the cell colour (not pure black).  We still occasionally use
+# a true black border so the model isn't fragile to either style.
+BORDER_FRAC_RANGE     = (0.04, 0.10)   # border thickness as fraction of cell pitch
+BORDER_BLACK_PROB     = 0.25           # chance to use pure black instead of dark-of-fill
+BORDER_DARKEN_FACTOR  = 0.45           # multiply fill colour by this for the border
 
 # Low-contrast regime — explicitly bias a fraction of samples so the
 # piece colour is close to the background colour (the failure mode the
@@ -210,32 +225,40 @@ def _draw_cell(
     color: tuple[int, int, int],
     *,
     gradient_bevel: bool = False,
+    border_frac: float = 0.07,
+    border_color: Optional[tuple[int, int, int]] = None,
 ) -> None:
     """Draw a single chamfered cell at (x, y) on `canvas`.
 
-    When ``gradient_bevel`` is True the cell is filled with a smooth
-    top→bottom value gradient instead of two ``cv2.line`` highlights.
-    This matches the real game's rendering style much more closely.
+    Parameters
+    ----------
+    gradient_bevel
+        When True the cell fill is a smooth top→bottom value gradient
+        (light → dark) instead of line-based bevel highlights.  Matches
+        the real game's look.
+    border_frac
+        Border thickness as a fraction of the cell pitch.
+    border_color
+        BGR colour for the outline.  Defaults to a darker shade of
+        ``color`` (which matches the real game); pass ``(0, 0, 0)`` for
+        the classic black border.
     """
     if size < 4:
         return
-    # Outline thickness scales with cell size so it always survives the
-    # resize-to-96 + 3× stride-2 pool pipeline.  A 1-px line gets averaged
-    # away by the second pool and the model loses the ability to count
-    # cells (4×1 starts looking like 5×1).
-    border = max(2, size // 8)
-    inset  = border  # main fill inset matches the border thickness
+    # Border thickness scales with cell size so it survives the resize
+    # pipeline, but stays thin enough to look right at large pitches.
+    border = max(1, int(round(size * border_frac)))
+    inset  = border
     fill_x0 = x + inset
     fill_y0 = y + inset
     fill_x1 = x + size - inset - 1
     fill_y1 = y + size - inset - 1
 
     if gradient_bevel:
-        # Smooth top→bottom gradient (light to dark) baked into the fill.
         fh = max(1, fill_y1 - fill_y0)
         fw = max(1, fill_x1 - fill_x0)
         light = np.array(_scale_color(color, 1.25), dtype=np.float32)
-        dark  = np.array(_scale_color(color, 0.65), dtype=np.float32)
+        dark  = np.array(_scale_color(color, 0.62), dtype=np.float32)
         ramp = np.linspace(0.0, 1.0, fh, dtype=np.float32)[:, None]
         col  = (1.0 - ramp) * light + ramp * dark           # (fh, 3)
         block = np.broadcast_to(col[:, None, :], (fh, fw, 3)).astype(np.uint8)
@@ -250,14 +273,15 @@ def _draw_cell(
         cv2.line(canvas, (fill_x0, fill_y1), (fill_x1, fill_y1), dark, bevel)
         cv2.line(canvas, (fill_x1, fill_y0), (fill_x1, fill_y1), dark, bevel)
 
-    # Thick black outline → this is what creates the visible separator
-    # between touching cells inside a piece, and (critically) what lets
-    # the CNN count cells after aggressive downsampling.
+    if border_color is None:
+        border_color = _scale_color(color, BORDER_DARKEN_FACTOR)
+    # Cell outline → this is what separates touching cells inside a
+    # piece and is what lets the CNN count cells after downsampling.
     cv2.rectangle(
         canvas,
         (x, y),
         (x + size - 1, y + size - 1),
-        (0, 0, 0),
+        border_color,
         border,
     )
 
@@ -380,9 +404,9 @@ def render_piece_sample(
     from the configured ranges unless overridden via the keyword args.
     """
     if slot_h is None:
-        slot_h = rng.randint(*SLOT_H_RANGE)
+        slot_h = rng.randint(*SLOT_HEIGHT_RANGE)
     if slot_w is None:
-        slot_w = rng.randint(*SLOT_W_RANGE)
+        slot_w = max(40, int(round(slot_h * rng.uniform(*SLOT_ASPECT_WH_RANGE))))
 
     # If we're rendering a piece, decide *before* drawing the background
     # whether to enter the low-contrast regime so we can match the bg
@@ -399,21 +423,27 @@ def render_piece_sample(
     if piece is not None:
         assert base_hsv is not None  # set above
         if cell_px is None:
-            cell_px = rng.randint(*CELL_PX_RANGE)
-        # Make sure the piece fits within the slot with some padding
-        max_cell_w = max(4, (slot_w - 8) // piece.cols)
-        max_cell_h = max(4, (slot_h - 8) // piece.rows)
-        cell_px = min(cell_px, max_cell_w, max_cell_h)
-        if cell_px < 6:
-            cell_px = 6
+            # Size the piece relative to the slot's *shorter* dimension so
+            # the piece sits in a realistic amount of padding (real
+            # crops show ~40–55% fill of the short side).
+            target_frac = rng.uniform(*PIECE_SIZE_FRAC_RANGE)
+            short_dim   = min(slot_w, slot_h)
+            longest     = max(piece.rows, piece.cols)
+            cell_px     = max(MIN_CELL_PX, int(target_frac * short_dim / longest))
+        # Hard cap so we don't overflow the slot for elongated pieces.
+        max_cell_w = max(MIN_CELL_PX, (slot_w - 8) // piece.cols)
+        max_cell_h = max(MIN_CELL_PX, (slot_h - 8) // piece.rows)
+        cell_px = max(MIN_CELL_PX, min(cell_px, max_cell_w, max_cell_h))
 
         piece_w = piece.cols * cell_px
         piece_h = piece.rows * cell_px
-        # Centre with random jitter (±15% of remaining padding)
+        # Centre with random jitter (±25% of the remaining padding)
         free_x = max(0, slot_w - piece_w)
         free_y = max(0, slot_h - piece_h)
-        ox = free_x // 2 + rng.randint(-free_x // 4, free_x // 4)
-        oy = free_y // 2 + rng.randint(-free_y // 4, free_y // 4)
+        jitter_x = free_x // 4
+        jitter_y = free_y // 4
+        ox = free_x // 2 + (rng.randint(-jitter_x, jitter_x) if jitter_x > 0 else 0)
+        oy = free_y // 2 + (rng.randint(-jitter_y, jitter_y) if jitter_y > 0 else 0)
         ox = int(np.clip(ox, 0, slot_w - piece_w))
         oy = int(np.clip(oy, 0, slot_h - piece_h))
 
@@ -423,8 +453,11 @@ def render_piece_sample(
 
         multi_color = rng.random() < MULTI_COLOR_PROB
         use_gradient_bevel = rng.random() < GRADIENT_BEVEL_PROB
+        border_frac = rng.uniform(*BORDER_FRAC_RANGE)
+        use_black_border = rng.random() < BORDER_BLACK_PROB
         for r, c in piece.cells:
             cell_color = _per_cell_color(base_hsv, rng, multi_color)
+            border_color = (0, 0, 0) if use_black_border else None
             _draw_cell(
                 canvas,
                 ox + c * cell_px,
@@ -432,6 +465,8 @@ def render_piece_sample(
                 cell_px,
                 cell_color,
                 gradient_bevel=use_gradient_bevel,
+                border_frac=border_frac,
+                border_color=border_color,
             )
 
     # Slight rotation + shear to mimic phone-capture skew (only when a

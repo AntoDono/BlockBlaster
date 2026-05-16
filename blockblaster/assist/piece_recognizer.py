@@ -100,11 +100,25 @@ class PieceRecognizer:
         queue_box: CalibrationBox,
     ) -> list[Optional[Piece]]:
         """Return a 3-element list of recognised pieces (None if unrecognised)."""
+        return [p for p, _ in self.recognize_queue_with_confidence(frame_bgr, queue_box)]
+
+    def recognize_queue_with_confidence(
+        self,
+        frame_bgr: np.ndarray,
+        queue_box: CalibrationBox,
+    ) -> list[tuple[Optional[Piece], float]]:
+        """Like :meth:`recognize_queue` but also returns a confidence in [0, 1].
+
+        For the CNN path this is the softmax probability of the chosen class.
+        For the heuristic fallback it's the template-match score.
+        """
         slot_crops = list(self._iter_slot_crops(frame_bgr, queue_box))
         if self._cnn is not None and self._cnn.is_ready:
-            return [p for p, _ in self._cnn.classify_slots(slot_crops)]
-        # Heuristic fallback
-        return [p for p, _ in self._recognize_queue_with_debug(frame_bgr, queue_box)]
+            return self._cnn.classify_slots(slot_crops)
+        return [
+            (p, dbg.best_score)
+            for p, dbg in self._recognize_queue_with_debug(frame_bgr, queue_box)
+        ]
 
     def save_debug(
         self,
