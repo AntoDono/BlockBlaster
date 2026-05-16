@@ -25,38 +25,86 @@ from blockblaster.game.pieces import PIECES, Piece
 NUM_PIECES = len(PIECES)
 EMPTY_CLASS_ID = NUM_PIECES            # class index for "empty slot"
 NUM_CLASSES   = NUM_PIECES + 1
-INPUT_SIZE    = 64                     # the CNN works on 64×64 RGB crops
+INPUT_SIZE    = 96                     # the CNN works on 96×96 RGB crops
 
 # Default canvas sizes (slot dimensions before resize).  We render at
 # higher resolution and rely on the resize-to-INPUT_SIZE step to bake in
 # realistic anti-aliasing.
-SLOT_W_RANGE  = (96, 220)
-SLOT_H_RANGE  = (96, 220)
-CELL_PX_RANGE = (12, 32)               # cell pitch in pixels
+SLOT_W_RANGE  = (120, 260)
+SLOT_H_RANGE  = (120, 260)
+CELL_PX_RANGE = (16, 38)               # cell pitch in pixels
 
-# Background colour distributions (BGR).  Block Blast queue panels are
-# dark navy/blue with subtle vignetting.
-BG_BASE_BGR = np.array([60, 40, 25], dtype=np.int16)
-BG_JITTER   = 18                       # per-channel noise
+# Background colour — sampled per-image across a wide HSV range so the
+# classifier doesn't lock onto "dark navy" as part of the piece signature.
+# Real game backgrounds vary considerably (different levels, brightness,
+# UI panel tints) so we cover dark→bright and any hue.
+BG_HUE_RANGE = (0, 179)                # any colour
+BG_SAT_RANGE = (0, 220)                # gray-ish to saturated
+BG_VAL_RANGE = (20, 210)               # dark to medium-bright
+BG_JITTER    = 18                      # per-channel noise on top of base
 
 # Block Blast palette covers many saturated hues.  We sample HSV to get
 # the same look for any colour the game might use.
 HSV_S_RANGE = (140, 240)
 HSV_V_RANGE = (170, 240)
 
+# Per-cell colour variation — real Block Blast pieces are sometimes a
+# uniform colour with subtle per-cell shading variation, and sometimes
+# pieces are made up of cells in totally different colours (e.g. clear
+# bonuses).  Match both regimes so the classifier doesn't lock onto
+# colour uniformity as a feature.
+PER_CELL_HUE_JITTER = 6                # ±degrees on H (0–179)
+PER_CELL_S_JITTER   = 30               # ±points on S
+PER_CELL_V_JITTER   = 25               # ±points on V
+MULTI_COLOR_PROB    = 0.20             # chance every cell is independently coloured
+
+# Geometric augmentation — small affine perturbations so the classifier
+# is robust to rotation and minor perspective skew from the phone capture.
+ROTATION_JITTER_DEG = 7.0              # ±degrees
+SHEAR_JITTER        = 0.06             # ±shear factor
+
 
 # ---------------------------------------------------------------------------
 # Colour helpers
 # ---------------------------------------------------------------------------
 
-def _random_piece_color(rng: random.Random) -> tuple[int, int, int]:
-    """Sample a saturated piece colour in BGR."""
-    h = rng.randint(0, 179)
-    s = rng.randint(*HSV_S_RANGE)
-    v = rng.randint(*HSV_V_RANGE)
-    hsv = np.array([[[h, s, v]]], dtype=np.uint8)
+def _hsv_to_bgr(h: int, s: int, v: int) -> tuple[int, int, int]:
+    hsv = np.array([[[h % 180, np.clip(s, 0, 255), np.clip(v, 0, 255)]]], dtype=np.uint8)
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
     return int(bgr[0]), int(bgr[1]), int(bgr[2])
+
+
+def _random_hsv(rng: random.Random) -> tuple[int, int, int]:
+    return (
+        rng.randint(0, 179),
+        rng.randint(*HSV_S_RANGE),
+        rng.randint(*HSV_V_RANGE),
+    )
+
+
+def _random_piece_color(rng: random.Random) -> tuple[int, int, int]:
+    """Sample a saturated piece colour in BGR."""
+    return _hsv_to_bgr(*_random_hsv(rng))
+
+
+def _per_cell_color(
+    base_hsv: tuple[int, int, int],
+    rng: random.Random,
+    multi_color: bool,
+) -> tuple[int, int, int]:
+    """Return a BGR colour for one cell of a piece.
+
+    If ``multi_color`` is True we draw an independent random colour;
+    otherwise we apply a small HSV jitter around ``base_hsv`` so cells of
+    the same piece look related but not identical.
+    """
+    if multi_color:
+        return _hsv_to_bgr(*_random_hsv(rng))
+    h, s, v = base_hsv
+    h += rng.randint(-PER_CELL_HUE_JITTER, PER_CELL_HUE_JITTER)
+    s += rng.randint(-PER_CELL_S_JITTER, PER_CELL_S_JITTER)
+    v += rng.randint(-PER_CELL_V_JITTER, PER_CELL_V_JITTER)
+    return _hsv_to_bgr(h, s, v)
 
 
 def _scale_color(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
@@ -70,17 +118,39 @@ def _scale_color(color: tuple[int, int, int], factor: float) -> tuple[int, int, 
 def _random_background(
     h: int, w: int, rng: random.Random
 ) -> np.ndarray:
-    """Dark navy background with per-channel jitter and gentle gradient."""
-    base = BG_BASE_BGR + rng.randint(-10, 10)
-    bg = np.full((h, w, 3), base, dtype=np.int16)
-    # Add per-pixel noise
-    bg += rng.randint(0, BG_JITTER) * np.random.randn(h, w, 3).astype(np.int16) // 4
-    # Mild radial vignette (centre slightly brighter)
-    if rng.random() < 0.5:
-        cy, cx = h / 2, w / 2
-        ys, xs = np.indices((h, w))
-        dist = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) / max(h, w)
-        bg = bg + (10 - 20 * dist).astype(np.int16)[..., None]
+    """Solid background of a randomly-sampled colour, plus jitter / gradient.
+
+    The base colour spans the full hue range and a wide brightness band so
+    the classifier sees pieces on dark navy, light teal, mid-grey, even
+    bright purple-ish backgrounds.  This keeps the model from coupling
+    background colour to the "is a piece present?" decision.
+    """
+    base_h = rng.randint(*BG_HUE_RANGE)
+    base_s = rng.randint(*BG_SAT_RANGE)
+    base_v = rng.randint(*BG_VAL_RANGE)
+    base_bgr = np.array(_hsv_to_bgr(base_h, base_s, base_v), dtype=np.int16)
+
+    bg = np.full((h, w, 3), base_bgr, dtype=np.int16)
+    # Per-pixel noise (uniform — fast and indistinguishable from gaussian
+    # at this magnitude).
+    noise = np.random.randint(-BG_JITTER, BG_JITTER + 1, (h, w, 3), dtype=np.int16)
+    bg += noise
+
+    # Optional brightness gradient (top→bottom or radial vignette).  Keeps
+    # the strength small so the bg still reads as one colour.
+    if rng.random() < 0.6:
+        kind = rng.random()
+        if kind < 0.5:
+            # Linear vertical gradient
+            grad = np.linspace(-15, 15, h, dtype=np.int16)[:, None, None]
+            bg += grad * rng.choice([-1, 1])
+        else:
+            # Radial vignette (corners darker)
+            cy, cx = h / 2, w / 2
+            ys, xs = np.indices((h, w))
+            dist = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) / max(h, w)
+            bg += (15 - 30 * dist).astype(np.int16)[..., None]
+
     return np.clip(bg, 0, 255).astype(np.uint8)
 
 
@@ -155,15 +225,33 @@ def render_piece_sample(
         ox = int(np.clip(ox, 0, slot_w - piece_w))
         oy = int(np.clip(oy, 0, slot_h - piece_h))
 
-        color = _random_piece_color(rng)
+        base_hsv = _random_hsv(rng)
+        multi_color = rng.random() < MULTI_COLOR_PROB
         for r, c in piece.cells:
+            cell_color = _per_cell_color(base_hsv, rng, multi_color)
             _draw_cell(
                 canvas,
                 ox + c * cell_px,
                 oy + r * cell_px,
                 cell_px,
-                color,
+                cell_color,
             )
+
+    # Slight rotation + shear to mimic phone-capture skew (only when a
+    # piece is present — avoids waste on blank backgrounds).
+    if piece is not None and rng.random() < 0.7:
+        angle = rng.uniform(-ROTATION_JITTER_DEG, ROTATION_JITTER_DEG)
+        shear = rng.uniform(-SHEAR_JITTER, SHEAR_JITTER)
+        ch, cw = canvas.shape[:2]
+        M = cv2.getRotationMatrix2D((cw / 2, ch / 2), angle, 1.0)
+        # Inject shear directly into the affine matrix
+        M[0, 1] += shear
+        M[1, 0] += shear * 0.5
+        canvas = cv2.warpAffine(
+            canvas, M, (cw, ch),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
 
     # Optional gentle blur to mimic device downsampling
     if rng.random() < 0.4:
