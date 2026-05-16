@@ -70,7 +70,7 @@ PIECES: list[Piece] = [
     _piece(13, "L_2_BR", ["X.", "XX"]),   # bottom-right foot
     _piece(14, "L_2_BL", [".X", "XX"]),   # bottom-left foot
 
-    # ── L-shapes (3-cell leg) ──
+    # ── L-shapes (3-cell leg + 1-cell foot, 4 cells total) ──
     _piece(15, "L_3_TR", ["XXX", "X.."]),
     _piece(16, "L_3_TL", ["XXX", "..X"]),
     _piece(17, "L_3_BR", ["X..", "XXX"]),
@@ -100,6 +100,13 @@ PIECES: list[Piece] = [
     _piece(33, "DIAG_2_FS", [".X", "X."]),               # "/" direction, length 2
     _piece(34, "DIAG_3_BS", ["X..", ".X.", "..X"]),      # "\" direction, length 3
     _piece(35, "DIAG_3_FS", ["..X", ".X.", "X.."]),      # "/" direction, length 3
+
+    # ── L-shapes (3-cell leg + 3-cell leg sharing a corner, 5 cells total) ──
+    # All 4 rotations; suffix marks which corner of the 3×3 bbox the elbow is in.
+    _piece(38, "L_5_TL", ["XXX", "X..", "X.."]),         # elbow top-left
+    _piece(39, "L_5_TR", ["XXX", "..X", "..X"]),         # elbow top-right
+    _piece(40, "L_5_BL", ["X..", "X..", "XXX"]),         # elbow bottom-left
+    _piece(41, "L_5_BR", ["..X", "..X", "XXX"]),         # elbow bottom-right
 ]
 
 PIECE_BY_ID: dict[int, Piece] = {p.piece_id: p for p in PIECES}
