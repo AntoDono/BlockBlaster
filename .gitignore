@@ -12,3 +12,4 @@ wheels/
 # Generated data
 simulations/
 checkpoints/
+synth_debug
