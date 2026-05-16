@@ -1,0 +1,46 @@
+=== Slot 1 ===
+  fill_pixels   : 11767
+  has_piece     : True
+  bbox (x,y→x,y): (90, 173, 265, 290)
+  best fit      : 2 rows × 3 cols  (cell 58.5 × 58.3px)
+  pattern       :
+                  ..X
+                  XXX
+  best score    : 0.947
+  top candidates:
+    0.947  L_3_BL      (2×3)
+    0.632  L_3_BR      (2×3)
+    0.632  S_H         (2×3)
+    0.632  T_U         (2×3)
+    0.316  L_3_TR      (2×3)
+  → result      : L_3_BL
+
+=== Slot 2 ===
+  fill_pixels   : 20475
+  has_piece     : True
+  bbox (x,y→x,y): (85, 173, 260, 290)
+  best fit      : 1 rows × 2 cols  (cell 117.0 × 87.5px)
+  pattern       :
+                  XX
+  best score    : 0.710
+  top candidates:
+    0.710  1x2         (1×2)
+    0.632  L_3_TR      (2×3)
+    0.632  L_3_TL      (2×3)
+    0.632  L_3_BR      (2×3)
+    0.632  L_3_BL      (2×3)
+  → result      : 1x2
+
+=== Slot 3 ===
+  fill_pixels   : 13865
+  has_piece     : True
+  bbox (x,y→x,y): (50, 202, 285, 261)
+  best fit      : 1 rows × 4 cols  (cell 59.0 × 58.8px)
+  pattern       :
+                  XXXX
+  best score    : 0.946
+  top candidates:
+    0.946  1x4         (1×4)
+    0.757  1x5         (1×5)
+    0.716  1x3         (1×3)
+  → result      : 1x4

@@ -63,6 +63,41 @@ MULTI_COLOR_PROB    = 0.20             # chance every cell is independently colo
 ROTATION_JITTER_DEG = 7.0              # ±degrees
 SHEAR_JITTER        = 0.06             # ±shear factor
 
+# Drop-shadow rendering — real Block Blast pieces cast a soft dark shadow
+# to the bottom-right.  Without this in training data the CNN gets
+# confused on low-contrast pieces (the shadow looks like extra ghost
+# cells of the piece).
+SHADOW_PROB         = 0.85             # chance to render a drop shadow at all
+SHADOW_OFFSET_FRAC  = (0.08, 0.22)     # offset as a fraction of cell pitch
+SHADOW_ALPHA_RANGE  = (0.18, 0.45)     # darkness of the shadow (0=none, 1=black)
+SHADOW_BLUR_FRAC    = (0.10, 0.35)     # gaussian blur sigma as fraction of cell pitch
+
+# Realistic gradient-fill bevel (a smoother alternative to the line-based
+# bevel).  Mixed in randomly so the model sees both rendering styles.
+GRADIENT_BEVEL_PROB = 0.5
+
+# Low-contrast regime — explicitly bias a fraction of samples so the
+# piece colour is close to the background colour (the failure mode the
+# original synth distribution rarely covered).
+LOW_CONTRAST_PROB   = 0.30
+LOW_CONTRAST_DV     = 50               # max |V_piece - V_bg|
+LOW_CONTRAST_DH     = 12               # max |H_piece - H_bg| (degrees)
+
+# JPEG-like compression artefacts (real phone screenshots are usually
+# re-compressed somewhere along the pipeline).
+JPEG_PROB           = 0.4
+JPEG_QUALITY_RANGE  = (45, 90)
+
+# Occasional global colour cast (camera white balance, screen tint).
+COLOR_CAST_PROB     = 0.35
+COLOR_CAST_MAX      = 18               # ±BGR offset per channel
+
+# Occasional small occlusion / UI overlay clipped into the slot
+# (notification, finger, banner).  Just a soft semi-transparent
+# rectangle at a random edge.
+OCCLUSION_PROB      = 0.10
+OCCLUSION_SIZE_FRAC = (0.05, 0.22)
+
 
 # ---------------------------------------------------------------------------
 # Colour helpers
@@ -116,7 +151,10 @@ def _scale_color(color: tuple[int, int, int], factor: float) -> tuple[int, int, 
 
 
 def _random_background(
-    h: int, w: int, rng: random.Random
+    h: int,
+    w: int,
+    rng: random.Random,
+    forced_hsv: Optional[tuple[int, int, int]] = None,
 ) -> np.ndarray:
     """Solid background of a randomly-sampled colour, plus jitter / gradient.
 
@@ -124,10 +162,16 @@ def _random_background(
     the classifier sees pieces on dark navy, light teal, mid-grey, even
     bright purple-ish backgrounds.  This keeps the model from coupling
     background colour to the "is a piece present?" decision.
+
+    Pass ``forced_hsv`` to override the random base colour (used by the
+    low-contrast regime to match the background tightly to the piece).
     """
-    base_h = rng.randint(*BG_HUE_RANGE)
-    base_s = rng.randint(*BG_SAT_RANGE)
-    base_v = rng.randint(*BG_VAL_RANGE)
+    if forced_hsv is not None:
+        base_h, base_s, base_v = forced_hsv
+    else:
+        base_h = rng.randint(*BG_HUE_RANGE)
+        base_s = rng.randint(*BG_SAT_RANGE)
+        base_v = rng.randint(*BG_VAL_RANGE)
     base_bgr = np.array(_hsv_to_bgr(base_h, base_s, base_v), dtype=np.int16)
 
     bg = np.full((h, w, 3), base_bgr, dtype=np.int16)
@@ -164,8 +208,15 @@ def _draw_cell(
     y: int,
     size: int,
     color: tuple[int, int, int],
+    *,
+    gradient_bevel: bool = False,
 ) -> None:
-    """Draw a single chamfered cell at (x, y) on `canvas`."""
+    """Draw a single chamfered cell at (x, y) on `canvas`.
+
+    When ``gradient_bevel`` is True the cell is filled with a smooth
+    top→bottom value gradient instead of two ``cv2.line`` highlights.
+    This matches the real game's rendering style much more closely.
+    """
     if size < 4:
         return
     # Outline thickness scales with cell size so it always survives the
@@ -174,25 +225,31 @@ def _draw_cell(
     # cells (4×1 starts looking like 5×1).
     border = max(2, size // 8)
     inset  = border  # main fill inset matches the border thickness
-    # Main fill (inset so the dark border clearly separates touching cells)
-    cv2.rectangle(
-        canvas,
-        (x + inset, y + inset),
-        (x + size - inset - 1, y + size - inset - 1),
-        color,
-        -1,
-    )
+    fill_x0 = x + inset
+    fill_y0 = y + inset
+    fill_x1 = x + size - inset - 1
+    fill_y1 = y + size - inset - 1
 
-    light = _scale_color(color, 1.35)
-    dark  = _scale_color(color, 0.55)
+    if gradient_bevel:
+        # Smooth top→bottom gradient (light to dark) baked into the fill.
+        fh = max(1, fill_y1 - fill_y0)
+        fw = max(1, fill_x1 - fill_x0)
+        light = np.array(_scale_color(color, 1.25), dtype=np.float32)
+        dark  = np.array(_scale_color(color, 0.65), dtype=np.float32)
+        ramp = np.linspace(0.0, 1.0, fh, dtype=np.float32)[:, None]
+        col  = (1.0 - ramp) * light + ramp * dark           # (fh, 3)
+        block = np.broadcast_to(col[:, None, :], (fh, fw, 3)).astype(np.uint8)
+        canvas[fill_y0:fill_y0 + fh, fill_x0:fill_x0 + fw] = block
+    else:
+        cv2.rectangle(canvas, (fill_x0, fill_y0), (fill_x1, fill_y1), color, -1)
+        light = _scale_color(color, 1.35)
+        dark  = _scale_color(color, 0.55)
+        bevel = max(1, size // 10)
+        cv2.line(canvas, (fill_x0, fill_y0), (fill_x1, fill_y0), light, bevel)
+        cv2.line(canvas, (fill_x0, fill_y0), (fill_x0, fill_y1), light, bevel)
+        cv2.line(canvas, (fill_x0, fill_y1), (fill_x1, fill_y1), dark, bevel)
+        cv2.line(canvas, (fill_x1, fill_y0), (fill_x1, fill_y1), dark, bevel)
 
-    bevel = max(1, size // 10)
-    # Top + left highlight
-    cv2.line(canvas, (x + inset, y + inset), (x + size - inset - 1, y + inset), light, bevel)
-    cv2.line(canvas, (x + inset, y + inset), (x + inset, y + size - inset - 1), light, bevel)
-    # Bottom + right shadow
-    cv2.line(canvas, (x + inset, y + size - inset - 1), (x + size - inset - 1, y + size - inset - 1), dark, bevel)
-    cv2.line(canvas, (x + size - inset - 1, y + inset), (x + size - inset - 1, y + size - inset - 1), dark, bevel)
     # Thick black outline → this is what creates the visible separator
     # between touching cells inside a piece, and (critically) what lets
     # the CNN count cells after aggressive downsampling.
@@ -203,6 +260,111 @@ def _draw_cell(
         (0, 0, 0),
         border,
     )
+
+
+def _draw_piece_shadow(
+    canvas: np.ndarray,
+    piece: Piece,
+    ox: int,
+    oy: int,
+    cell_px: int,
+    rng: random.Random,
+) -> None:
+    """Composite a soft drop-shadow of the piece onto ``canvas`` in-place.
+
+    Renders the piece's silhouette (one filled rectangle per cell) into a
+    separate single-channel alpha mask, offsets it bottom-right, gaussian
+    blurs it, then alpha-blends a darkened version of the canvas through
+    that mask.  The result looks like a real Block Blast piece shadow:
+    soft, slightly offset, the shape of the piece itself.
+    """
+    h, w = canvas.shape[:2]
+    dx = int(round(cell_px * rng.uniform(*SHADOW_OFFSET_FRAC)))
+    dy = int(round(cell_px * rng.uniform(*SHADOW_OFFSET_FRAC)))
+    alpha_peak = rng.uniform(*SHADOW_ALPHA_RANGE)
+
+    alpha = np.zeros((h, w), dtype=np.float32)
+    for r, c in piece.cells:
+        x0 = ox + c * cell_px + dx
+        y0 = oy + r * cell_px + dy
+        x1 = x0 + cell_px
+        y1 = y0 + cell_px
+        x0c, y0c = max(0, x0), max(0, y0)
+        x1c, y1c = min(w, x1), min(h, y1)
+        if x1c <= x0c or y1c <= y0c:
+            continue
+        alpha[y0c:y1c, x0c:x1c] = alpha_peak
+
+    if alpha.max() == 0:
+        return
+
+    sigma = max(0.5, cell_px * rng.uniform(*SHADOW_BLUR_FRAC))
+    k = int(sigma * 4) | 1   # odd kernel covering ±2σ
+    alpha = cv2.GaussianBlur(alpha, (k, k), sigma)
+    alpha = np.clip(alpha, 0.0, 1.0)[..., None]
+
+    canvas[:] = (canvas.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
+
+
+def _maybe_apply_occlusion(
+    canvas: np.ndarray, rng: random.Random
+) -> None:
+    """Optionally darken / blank a small strip at one edge of the slot."""
+    if rng.random() >= OCCLUSION_PROB:
+        return
+    h, w = canvas.shape[:2]
+    edge = rng.choice(("top", "bottom", "left", "right"))
+    frac = rng.uniform(*OCCLUSION_SIZE_FRAC)
+    color = np.array(
+        [rng.randint(0, 60), rng.randint(0, 60), rng.randint(0, 60)],
+        dtype=np.uint8,
+    )
+    alpha = rng.uniform(0.4, 0.9)
+    if edge == "top":
+        sl = (slice(0, max(1, int(h * frac))), slice(None))
+    elif edge == "bottom":
+        sl = (slice(h - max(1, int(h * frac)), h), slice(None))
+    elif edge == "left":
+        sl = (slice(None), slice(0, max(1, int(w * frac))))
+    else:
+        sl = (slice(None), slice(w - max(1, int(w * frac)), w))
+    region = canvas[sl].astype(np.float32)
+    canvas[sl] = (region * (1.0 - alpha) + color * alpha).astype(np.uint8)
+
+
+def _maybe_apply_jpeg(canvas: np.ndarray, rng: random.Random) -> np.ndarray:
+    """Round-trip through JPEG encode/decode to inject realistic artefacts."""
+    if rng.random() >= JPEG_PROB:
+        return canvas
+    q = rng.randint(*JPEG_QUALITY_RANGE)
+    ok, buf = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+    if not ok:
+        return canvas
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+def _maybe_apply_color_cast(canvas: np.ndarray, rng: random.Random) -> np.ndarray:
+    """Apply a small per-channel BGR offset (white-balance / screen tint)."""
+    if rng.random() >= COLOR_CAST_PROB:
+        return canvas
+    cast = np.array(
+        [rng.randint(-COLOR_CAST_MAX, COLOR_CAST_MAX) for _ in range(3)],
+        dtype=np.int16,
+    )
+    return np.clip(canvas.astype(np.int16) + cast, 0, 255).astype(np.uint8)
+
+
+def _low_contrast_background(
+    piece_hsv: tuple[int, int, int], rng: random.Random
+) -> tuple[int, int, int]:
+    """Sample a background HSV close to the piece HSV (low-contrast regime)."""
+    h, _s, v = piece_hsv
+    bg_h = (h + rng.randint(-LOW_CONTRAST_DH, LOW_CONTRAST_DH)) % 180
+    bg_s = rng.randint(60, 220)
+    dv = rng.randint(-LOW_CONTRAST_DV, LOW_CONTRAST_DV)
+    # Bias slightly darker than the piece (matches real game UI panels).
+    bg_v = int(np.clip(v + dv - 25, 15, 230))
+    return bg_h, bg_s, bg_v
 
 
 def render_piece_sample(
@@ -222,9 +384,20 @@ def render_piece_sample(
     if slot_w is None:
         slot_w = rng.randint(*SLOT_W_RANGE)
 
-    canvas = _random_background(slot_h, slot_w, rng)
+    # If we're rendering a piece, decide *before* drawing the background
+    # whether to enter the low-contrast regime so we can match the bg
+    # colour to the piece colour.
+    base_hsv: Optional[tuple[int, int, int]] = None
+    forced_bg_hsv: Optional[tuple[int, int, int]] = None
+    if piece is not None:
+        base_hsv = _random_hsv(rng)
+        if rng.random() < LOW_CONTRAST_PROB:
+            forced_bg_hsv = _low_contrast_background(base_hsv, rng)
+
+    canvas = _random_background(slot_h, slot_w, rng, forced_hsv=forced_bg_hsv)
 
     if piece is not None:
+        assert base_hsv is not None  # set above
         if cell_px is None:
             cell_px = rng.randint(*CELL_PX_RANGE)
         # Make sure the piece fits within the slot with some padding
@@ -244,8 +417,12 @@ def render_piece_sample(
         ox = int(np.clip(ox, 0, slot_w - piece_w))
         oy = int(np.clip(oy, 0, slot_h - piece_h))
 
-        base_hsv = _random_hsv(rng)
+        # Drop shadow first, so the piece sits on top of it.
+        if rng.random() < SHADOW_PROB:
+            _draw_piece_shadow(canvas, piece, ox, oy, cell_px, rng)
+
         multi_color = rng.random() < MULTI_COLOR_PROB
+        use_gradient_bevel = rng.random() < GRADIENT_BEVEL_PROB
         for r, c in piece.cells:
             cell_color = _per_cell_color(base_hsv, rng, multi_color)
             _draw_cell(
@@ -254,6 +431,7 @@ def render_piece_sample(
                 oy + r * cell_px,
                 cell_px,
                 cell_color,
+                gradient_bevel=use_gradient_bevel,
             )
 
     # Slight rotation + shear to mimic phone-capture skew (only when a
@@ -283,8 +461,19 @@ def render_piece_sample(
         beta  = -10 + rng.randint(0, 20)        # brightness
         canvas = np.clip(canvas.astype(np.int16) * alpha + beta, 0, 255).astype(np.uint8)
 
+    # Optional global colour cast (camera white balance / screen tint)
+    canvas = _maybe_apply_color_cast(canvas, rng)
+
+    # Optional small edge occlusion (banner, finger, UI bar clipped in)
+    _maybe_apply_occlusion(canvas, rng)
+
     # Resize to model input
     canvas = cv2.resize(canvas, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
+
+    # JPEG round-trip after resize so the artefacts land at model
+    # resolution, matching what a recompressed phone screenshot looks
+    # like by the time it reaches the classifier.
+    canvas = _maybe_apply_jpeg(canvas, rng)
     return canvas
 
 
