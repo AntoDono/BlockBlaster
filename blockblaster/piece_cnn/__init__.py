@@ -24,6 +24,7 @@ from blockblaster.piece_cnn.synth import (
     class_id_for,
     generate_batch,
     piece_for_class,
+    pregenerate_dataset,
     render_piece_sample,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "class_id_for",
     "generate_batch",
     "piece_for_class",
+    "pregenerate_dataset",
     "preprocess_batch",
     "preprocess_bgr",
     "render_piece_sample",
