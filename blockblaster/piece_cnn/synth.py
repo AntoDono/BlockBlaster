@@ -168,22 +168,41 @@ def _draw_cell(
     """Draw a single chamfered cell at (x, y) on `canvas`."""
     if size < 4:
         return
-    # Main fill (slightly inset so the dark border separates touching cells)
-    cv2.rectangle(canvas, (x + 1, y + 1), (x + size - 2, y + size - 2), color, -1)
+    # Outline thickness scales with cell size so it always survives the
+    # resize-to-96 + 3× stride-2 pool pipeline.  A 1-px line gets averaged
+    # away by the second pool and the model loses the ability to count
+    # cells (4×1 starts looking like 5×1).
+    border = max(2, size // 8)
+    inset  = border  # main fill inset matches the border thickness
+    # Main fill (inset so the dark border clearly separates touching cells)
+    cv2.rectangle(
+        canvas,
+        (x + inset, y + inset),
+        (x + size - inset - 1, y + size - inset - 1),
+        color,
+        -1,
+    )
 
     light = _scale_color(color, 1.35)
     dark  = _scale_color(color, 0.55)
 
     bevel = max(1, size // 10)
     # Top + left highlight
-    cv2.line(canvas, (x + 1, y + 1), (x + size - 2, y + 1), light, bevel)
-    cv2.line(canvas, (x + 1, y + 1), (x + 1, y + size - 2), light, bevel)
+    cv2.line(canvas, (x + inset, y + inset), (x + size - inset - 1, y + inset), light, bevel)
+    cv2.line(canvas, (x + inset, y + inset), (x + inset, y + size - inset - 1), light, bevel)
     # Bottom + right shadow
-    cv2.line(canvas, (x + 1, y + size - 2), (x + size - 2, y + size - 2), dark, bevel)
-    cv2.line(canvas, (x + size - 2, y + 1), (x + size - 2, y + size - 2), dark, bevel)
-    # Thin black outline → this is what creates the visible separator
-    # between touching cells inside a piece.
-    cv2.rectangle(canvas, (x, y), (x + size - 1, y + size - 1), (0, 0, 0), 1)
+    cv2.line(canvas, (x + inset, y + size - inset - 1), (x + size - inset - 1, y + size - inset - 1), dark, bevel)
+    cv2.line(canvas, (x + size - inset - 1, y + inset), (x + size - inset - 1, y + size - inset - 1), dark, bevel)
+    # Thick black outline → this is what creates the visible separator
+    # between touching cells inside a piece, and (critically) what lets
+    # the CNN count cells after aggressive downsampling.
+    cv2.rectangle(
+        canvas,
+        (x, y),
+        (x + size - 1, y + size - 1),
+        (0, 0, 0),
+        border,
+    )
 
 
 def render_piece_sample(

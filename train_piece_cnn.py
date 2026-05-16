@@ -34,7 +34,7 @@ from blockblaster.piece_cnn import (
 NUM_TRAIN_SAMPLES = 100_000     # synth examples for training
 NUM_VAL_SAMPLES   = 10_000      # held-out synth examples for validation
 NUM_WORKERS       = max(1, (os.cpu_count() or 4) - 1)  # CPU procs for synth
-BATCH_SIZE        = 1024        # large — model is tiny, GPU is bored
+BATCH_SIZE        = 512        # large — model is tiny, GPU is bored
 NUM_EPOCHS        = 12
 LEARNING_RATE     = 1e-3
 WEIGHT_DECAY      = 1e-4

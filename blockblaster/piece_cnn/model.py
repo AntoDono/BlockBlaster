@@ -22,7 +22,12 @@ DEFAULT_WEIGHT_PATH = Path("piece_cnn.pt")
 
 
 class PieceCNN(nn.Module):
-    """Compact convnet — ~110 K params, runs in <1 ms per crop on CPU."""
+    """Compact convnet — ~300 K params, runs in <1 ms per crop on CPU.
+
+    The head keeps a 4×4 spatial grid instead of global-average-pooling to
+    a single vector — counting cells (e.g. 4×1 vs 5×1) is fundamentally a
+    spatial task and GAP throws away exactly the information we need.
+    """
 
     def __init__(self, num_classes: int = NUM_CLASSES) -> None:
         super().__init__()
@@ -33,16 +38,19 @@ class PieceCNN(nn.Module):
         self.bn2   = nn.BatchNorm2d(64)
         self.bn3   = nn.BatchNorm2d(96)
         self.pool  = nn.MaxPool2d(2)
-        self.gap   = nn.AdaptiveAvgPool2d(1)
-        self.fc1   = nn.Linear(96, 128)
-        self.fc2   = nn.Linear(128, num_classes)
+        # Keep a coarse 4×4 spatial grid so the classifier can still tell
+        # "this row has 4 bumps" from "this row has 5 bumps".
+        self.head_pool = nn.AdaptiveAvgPool2d((4, 4))
+        self.dropout   = nn.Dropout(0.2)
+        self.fc1       = nn.Linear(96 * 4 * 4, 192)
+        self.fc2       = nn.Linear(192, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))   # 64 → 32
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))   # 32 → 16
-        x = self.pool(F.relu(self.bn3(self.conv3(x))))   # 16 →  8
-        x = self.gap(x).flatten(1)                        # → (B, 96)
-        x = F.relu(self.fc1(x))
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))   # 96 → 48
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))   # 48 → 24
+        x = self.pool(F.relu(self.bn3(self.conv3(x))))   # 24 → 12
+        x = self.head_pool(x).flatten(1)                  # → (B, 96*4*4)
+        x = F.relu(self.fc1(self.dropout(x)))
         return self.fc2(x)                                # logits
 
 
