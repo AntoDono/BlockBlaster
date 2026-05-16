@@ -10,7 +10,7 @@ Pipeline per slot:
      bbox.  Skip sub-divisions whose implied cell aspect is far from square.
   6. For each candidate, sample each sub-cell's mean mask value → boolean
      pattern.  The pattern must be tight (filled cells touch every edge).
-  7. For each pattern, compare against all 32 piece templates that share its
+  7. For each pattern, compare against all piece templates that share its
      shape; score = (cell-match ratio) × (cell-squareness preference).
   8. Return the highest-scoring piece (or None if no candidate cleared the
      minimum confidence).
@@ -66,7 +66,7 @@ class SlotDebug:
 
 
 class PieceRecognizer:
-    """Recognises which of the 32 Block Blast pieces occupy each queue slot.
+    """Recognises which Block Blast piece occupies each queue slot.
 
     By default this uses a CNN classifier trained on synthetic data
     (``piece_cnn.pt``).  If the CNN weights are missing or fail to load it

@@ -63,7 +63,7 @@ def run() -> None:
     # Load persisted calibration (both slots)
     cfg = CalibrationConfig.load()
 
-    # Piece recognizer (pre-computes 32 templates at init)
+    # Piece recognizer (pre-computes one template per piece at init)
     recognizer = PieceRecognizer()
 
     # Move advisor (loads ValueNet from model.pt; degrades gracefully if missing)

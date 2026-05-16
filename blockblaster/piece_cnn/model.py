@@ -1,4 +1,4 @@
-"""Tiny CNN classifier for the Block Blast queue (32 pieces + empty)."""
+"""Tiny CNN classifier for the Block Blast queue (all pieces + empty)."""
 
 from __future__ import annotations
 

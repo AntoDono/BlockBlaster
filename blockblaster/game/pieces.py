@@ -60,6 +60,10 @@ PIECES: list[Piece] = [
     _piece(9,  "2x2",    ["XX", "XX"]),
     _piece(10, "3x3",    ["XXX", "XXX", "XXX"]),
 
+    # ── Rectangles ──
+    _piece(36, "2x3",    ["XXX", "XXX"]),               # 2 rows × 3 cols
+    _piece(37, "3x2",    ["XX", "XX", "XX"]),           # 3 rows × 2 cols
+
     # ── L-shapes (2-cell leg) ──
     _piece(11, "L_2_TR", ["XX", "X."]),   # top-right foot
     _piece(12, "L_2_TL", ["XX", ".X"]),   # top-left foot
@@ -90,6 +94,12 @@ PIECES: list[Piece] = [
 
     # ── Plus ──
     _piece(31, "PLUS",   [".X.", "XXX", ".X."]),
+
+    # ── Diagonals (corner-touching cells, not edge-adjacent) ──
+    _piece(32, "DIAG_2_BS", ["X.", ".X"]),               # "\" direction, length 2
+    _piece(33, "DIAG_2_FS", [".X", "X."]),               # "/" direction, length 2
+    _piece(34, "DIAG_3_BS", ["X..", ".X.", "..X"]),      # "\" direction, length 3
+    _piece(35, "DIAG_3_FS", ["..X", ".X.", "X.."]),      # "/" direction, length 3
 ]
 
 PIECE_BY_ID: dict[int, Piece] = {p.piece_id: p for p in PIECES}
