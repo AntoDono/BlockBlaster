@@ -42,6 +42,10 @@ class AppState:
     auto_enabled: bool = False
     auto_last_executed_frame: int = -1
     auto_busy_until: float = 0.0
+    # Sticky gate-reason so app_autoplay can log "why did the loop stop
+    # firing" exactly once per consecutive run of the same failure,
+    # rather than every analyzer tick.
+    auto_last_gate_reason: Optional[str] = None
 
     # Visual-servo freeze ----------------------------------------------------
     # While a servo placement is in flight we pause the queue CNN + advisor

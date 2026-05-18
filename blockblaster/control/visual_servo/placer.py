@@ -24,7 +24,11 @@ from typing import Optional
 
 from blockblaster.assist.advisor import Suggestion
 from blockblaster.assist.calibration import CalibrationConfig
-from blockblaster.control.coords import piece_anchor_px, slot_center_px
+from blockblaster.control.coords import (
+    grab_to_anchor_offset_px,
+    piece_anchor_px,
+    slot_center_px,
+)
 from blockblaster.control.device import Device
 from blockblaster.control.scrcpy_control import get_scrcpy
 from blockblaster.control.visual_servo import plant_gain
@@ -36,6 +40,8 @@ from blockblaster.control.visual_servo.detection import (
     snapshot_initial_placed,
 )
 from blockblaster.control.visual_servo.tunables import (
+    BLIND_COMMIT_TOL_PX,
+    FINGER_RENDER_LIFT_PX,
     FRAME_TIMEOUT_S,
     GRAB_Y_NUDGE_PX,
     HOLD_MS,
@@ -80,6 +86,10 @@ def place_with_servo(
     if not serial:
         return ServoResult(False, "device has no ADB serial", 0)
 
+    # Load any previously-learned plant gains for this specific device.
+    # First call per process / device hits disk; subsequent calls are no-ops.
+    plant_gain.bind_device(serial)
+
     try:
         dev_w, dev_h = device.screen_size()
     except Exception as exc:
@@ -106,6 +116,26 @@ def place_with_servo(
     target_anchor = piece_anchor_px(
         cfg.grid, suggestion.piece, suggestion.row, suggestion.col,
     )
+    # Where the *finger* needs to be for the held piece to overlay
+    # ``target_anchor``.  Two corrections to ``target_anchor``:
+    #
+    # 1. **Render lift** (Y only): Block Blast draws the held piece
+    #    above the finger by a roughly constant FINGER_RENDER_LIFT_PX.
+    #    Without this, top-row placements drive the finger off-screen
+    #    above the board and learning never converges (the piece falls
+    #    outside the scanner's grid box, see tunables.py).
+    # 2. **Grab → anchor offset** (per-piece): the finger grabs the
+    #    piece at its geometric centre, but ``target_anchor`` refers to
+    #    the bottom-row-centre.  For a vertical 4×1 those points differ
+    #    by 1.5 cells in Y; for a horizontal 1×4 they coincide.  Without
+    #    this correction the servo over-aims for tall pieces and
+    #    under-aims for wide pieces with offset bottoms (L-shapes, etc.).
+    grab_dx, grab_dy = grab_to_anchor_offset_px(cfg.grid, suggestion.piece)
+    finger_target = (
+        target_anchor[0] - grab_dx,
+        target_anchor[1] + FINGER_RENDER_LIFT_PX - grab_dy,
+    )
+
     slot_cx, slot_cy = slot_center_px(cfg.queue, suggestion.slot)
     # The piece icon is rendered above the slot's geometric centre; press
     # up there so Block Blast actually picks the piece up on DOWN.
@@ -115,6 +145,16 @@ def place_with_servo(
     # ── Snapshot the board so we can isolate the held piece later ──────
     pre_frame, _ = device.get_latest_with_id()
     initial_placed_cells = snapshot_initial_placed(pre_frame, cfg.grid)
+    if SERVO_DEBUG:
+        print(
+            f"[servo init] piece={suggestion.piece.name} "
+            f"({suggestion.piece.rows}x{suggestion.piece.cols}) "
+            f"initial_placed={len(initial_placed_cells)} cells "
+            f"target_cells={sorted(expected_cells)} "
+            f"target_anchor={target_anchor} "
+            f"grab_offset=({grab_dx},{grab_dy}) "
+            f"finger_target={finger_target} grab={down_px}"
+        )
 
     # ── Per-call plant-gain estimate (seeded from cache) ───────────────
     plant_gx, plant_gy = plant_gain.seed_estimates()
@@ -151,8 +191,8 @@ def place_with_servo(
         learned_gx, learned_gy = plant_gain.get_learned()
         undershoot_x = plant_gain.coarse_undershoot_for(learned_gx)
         undershoot_y = plant_gain.coarse_undershoot_for(learned_gy)
-        coarse_x = finger_fpx[0] + int(round(undershoot_x * (target_anchor[0] - finger_fpx[0])))
-        coarse_y = finger_fpx[1] + int(round(undershoot_y * (target_anchor[1] - finger_fpx[1])))
+        coarse_x = finger_fpx[0] + int(round(undershoot_x * (finger_target[0] - finger_fpx[0])))
+        coarse_y = finger_fpx[1] + int(round(undershoot_y * (finger_target[1] - finger_fpx[1])))
         finger_fpx = (coarse_x, coarse_y)
         if SERVO_DEBUG:
             print(
@@ -180,9 +220,71 @@ def place_with_servo(
 
             piece_cells = detect_piece_cells(frame, cfg.grid, initial_placed_cells)
             if not piece_cells:
+                if SERVO_DEBUG:
+                    # Diagnose detection failures: print BOTH the
+                    # placed-band scan and the ghost-band scan so we can
+                    # see whether the piece is invisible to both signals
+                    # (grab failed / piece off-board) or just one (bad
+                    # HSV thresholds for this device).
+                    from blockblaster.assist.scanner import scan_board_with_ghost
+                    p, g = scan_board_with_ghost(frame, cfg.grid)
+                    pc = {(int(r), int(c)) for r, c in zip(*p.nonzero())}
+                    gc = {(int(r), int(c)) for r, c in zip(*g.nonzero())}
+                    print(
+                        f"[servo {iters:02d}] no piece: placed={len(pc)} "
+                        f"ghost={len(gc)} initial={len(initial_placed_cells)} "
+                        f"new={sorted((pc | gc) - initial_placed_cells)} "
+                        f"occluded={sorted(initial_placed_cells - pc)} "
+                        f"finger={finger_fpx}"
+                    )
+                    # On the first failure of a placement, dump the
+                    # cropped board to disk so we can eyeball where the
+                    # piece actually is vs. where the scanner is looking.
+                    # See blockblaster/assist/scanner.py:write_ghost_overlay
+                    # for the format — placed=green outline, ghost=yellow.
+                    if no_piece == 0:
+                        try:
+                            from blockblaster.assist.scanner import write_ghost_overlay
+                            import os
+                            os.makedirs("servo_debug", exist_ok=True)
+                            path = f"servo_debug/no_piece_iter{iters:02d}.png"
+                            write_ghost_overlay(frame, cfg.grid, path)
+                            print(f"[servo {iters:02d}] dumped overlay → {path}")
+                        except Exception as exc:
+                            print(f"[servo {iters:02d}] overlay dump failed: {exc}")
                 no_piece += 1
                 if no_piece >= MAX_NO_PIECE_FRAMES:
-                    return _abort(session, "piece never appeared on board", iters, down_px, to_dev)
+                    # Blind commit fallback (for devices where the held
+                    # piece is rendered outside the calibrated board area
+                    # so the scanner never sees it mid-drag).  Only fire
+                    # if the open-loop jump actually parked the finger
+                    # near the target — otherwise we'd be committing a
+                    # guaranteed misplacement and the auto-loop would
+                    # think we succeeded.
+                    err_x = abs(finger_fpx[0] - finger_target[0])
+                    err_y = abs(finger_fpx[1] - finger_target[1])
+                    if err_x <= BLIND_COMMIT_TOL_PX and err_y <= BLIND_COMMIT_TOL_PX:
+                        if SERVO_DEBUG:
+                            print(
+                                f"[servo {iters:02d}] blind commit: lifting at "
+                                f"finger={finger_fpx} finger_target={finger_target} "
+                                f"err=({err_x},{err_y})"
+                            )
+                        time.sleep(PRE_LIFT_MS / 1000.0)
+                        session.up()
+                        return ServoResult(True, "blind commit", iters)
+                    if SERVO_DEBUG:
+                        print(
+                            f"[servo {iters:02d}] blind commit DENIED: "
+                            f"finger={finger_fpx} finger_target={finger_target} "
+                            f"err=({err_x},{err_y}) > tol={BLIND_COMMIT_TOL_PX} "
+                            f"— aborting to queue"
+                        )
+                    return _abort(
+                        session,
+                        f"piece never appeared (finger {err_x}/{err_y}px from target)",
+                        iters, down_px, to_dev,
+                    )
                 continue
             no_piece = 0
 
@@ -248,7 +350,7 @@ def place_with_servo(
                 return _abort(session, "piece shape mismatch", iters, down_px, to_dev)
 
             new_x = finger_fpx[0] + dx
-            new_y = clamp_finger_y(finger_fpx[1] + dy, target_anchor[1])
+            new_y = clamp_finger_y(finger_fpx[1] + dy, finger_target[1])
             finger_fpx = (new_x, new_y)
             session.move(*to_dev(finger_fpx))
             time.sleep(POST_MOVE_SETTLE_MS / 1000.0)
@@ -264,11 +366,15 @@ def place_with_servo(
         if prev_piece_anchor is not None:
             plant_gain.set_learned(plant_gx, plant_gy)
             if SERVO_DEBUG:
+                from blockblaster.control.visual_servo.plant_gain import (
+                    _params_path,
+                )
                 print(
                     f"[servo learned] plant=({plant_gx:.2f},{plant_gy:.2f}) "
                     f"→ next coarse undershoot ≈ ("
                     f"{plant_gain.coarse_undershoot_for(plant_gx):.2f},"
-                    f"{plant_gain.coarse_undershoot_for(plant_gy):.2f})"
+                    f"{plant_gain.coarse_undershoot_for(plant_gy):.2f}) "
+                    f"saved to {_params_path(serial)}"
                 )
 
         if session is not None:

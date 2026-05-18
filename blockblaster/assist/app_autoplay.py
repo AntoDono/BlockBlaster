@@ -19,7 +19,7 @@ from blockblaster.control.coords import piece_anchor_px, slot_center_px
 from blockblaster.control.device import Device
 from blockblaster.control.visual_servo import _GRAB_Y_NUDGE_PX, place_with_servo
 
-AUTO_CONF_THRESHOLD = 0.65   # min CNN confidence across all 3 queue slots
+AUTO_CONF_THRESHOLD = 0.3   # min CNN confidence across all 3 queue slots
 AUTO_POST_PLACE_MS  = 500    # cooldown after the servo completes
 # Must be ≥ visual_servo._MAX_LOOP_S * 1000 + ADB / scrcpy overhead.
 AUTO_SERVO_BUDGET_MS = 3000
@@ -78,24 +78,44 @@ def maybe_execute_auto_swipe(
     Mutates ``state.auto_last_executed_frame``, ``state.auto_busy_until``,
     and ``state.auto_enabled`` (disabled on servo crash).
     """
+    # Each gate logs *once* per consecutive run of failures via
+    # state.auto_last_gate_reason, so the terminal isn't drowned in
+    # repeats but every state change is visible.  Helps diagnose
+    # "the servo stopped firing — why?" without adding prints to every
+    # caller.
+    def _gate(reason: str) -> None:
+        last = getattr(state, "auto_last_gate_reason", None)
+        if last != reason:
+            print(f"[auto] gated: {reason}")
+            state.auto_last_gate_reason = reason
+
     if not state.auto_enabled:
+        _gate("auto disabled")
         return
     if suggestion is None:
+        _gate("no suggestion from advisor")
         return
     if state.cfg.grid is None or not state.cfg.grid.is_valid():
+        _gate("grid not calibrated")
         return
     if state.cfg.queue is None or not state.cfg.queue.is_valid():
+        _gate("queue not calibrated")
         return
     if not analysis_changed:
-        return
+        return  # quiet: fires every tick between analyzer updates
     if analysis_frame_id == state.auto_last_executed_frame:
-        return
+        return  # quiet: same frame as the dispatch we just made
     if not queue_confidences:
+        _gate("no queue confidences yet")
         return
     if not all(c >= AUTO_CONF_THRESHOLD for c in queue_confidences):
+        low = [f"{c:.2f}" for c in queue_confidences]
+        _gate(f"queue CNN confidence below {AUTO_CONF_THRESHOLD}: {low}")
         return
     if pygame.time.get_ticks() < state.auto_busy_until:
-        return
+        return  # quiet: cooldown after previous servo
+    # All gates passed — clear the sticky reason so the next stall logs.
+    state.auto_last_gate_reason = None
 
     try:
         slot_cx, slot_cy = slot_center_px(state.cfg.queue, suggestion.slot)

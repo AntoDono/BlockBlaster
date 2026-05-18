@@ -137,26 +137,42 @@ The filters matter: `|df| < 4 px` is detection noise, and `df × dp ≤ 0`
 means the piece moved the *wrong way* (sticky frame, board edge, mis-
 detection) — we don't learn from those.
 
-### Persistence across placements
+### Persistence across placements (and across processes)
 
 At the end of every `place_with_servo` call (success **or** failure,
-inside `finally`), the per-axis estimates are written to module-scope
-variables `_learned_plant_gx` / `_learned_plant_gy`. The next call
-seeds its in-loop estimate from the cache, and the coarse jump
+inside `finally`), the per-axis estimates are written to both an
+in-memory mirror **and a per-device JSON file** at
+`<repo_root>/learned_device_params/<adb_serial>.json` (override the
+directory with the `BLOCKBLASTER_SERVO_PARAMS_DIR` env var). The next
+call — including across process restarts — seeds its in-loop estimate
+from that file, and the coarse jump
 (see [next section](#coarse-open-loop-jump)) uses it directly.
+
+A typical file:
+
+```json
+{
+  "device": "RZ8T31ABCDE",
+  "plant_gx": 1.83,
+  "plant_gy": 1.71,
+  "updated_at": 1747553042.12
+}
+```
 
 Effect across a session:
 
 | Placement # | Coarse undershoot used | Why |
 |---|---|---|
-| 1 | `COARSE_FALLBACK = 0.55` | no learning yet |
-| 2 | `0.92 / ~1.8 ≈ 0.51` | learned from #1's many iterations |
-| 3+ | `~0.50` | EMA has converged |
+| 1 (no file yet) | `COARSE_FALLBACK = 0.55` | no learning yet |
+| 1 (file exists) | `COARSE_SAFETY / saved_gain` | loaded from disk at bind |
+| 2+ | EMA continues, file rewritten each placement | |
 
-The cache is **process-local** — quit the GUI and it resets. If you
-want to flush it mid-session (e.g. switching devices), call
-`blockblaster.control.visual_servo.plant_gain.reset_learned()` from
-a REPL or trap your own keybinding.
+Hand-tuning: if you know the right gains for a device, just edit the
+JSON file directly. The numbers will be picked up on the next
+`place_with_servo`. Delete the file to force relearning; or call
+`blockblaster.control.visual_servo.plant_gain.reset_learned()`
+in-process to clear both memory and the on-disk file for the active
+device.
 
 Learning subsystem lives in
 [`plant_gain.py`](../blockblaster/control/visual_servo/plant_gain.py).

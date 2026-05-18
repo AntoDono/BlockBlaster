@@ -53,6 +53,48 @@ def _bottom_row_center(piece: Piece) -> tuple[float, float]:
     return float(max_r), cf
 
 
+def grab_to_anchor_offset_px(
+    grid_box: CalibrationBox,
+    piece: Piece,
+) -> tuple[int, int]:
+    """How far the piece's **bottom-row-centre** sits from its **geometric
+    centre**, in board frame-pixels.
+
+    The queue-slot grab puts the finger over the piece's geometric centre
+    (the centre of the icon).  ``piece_anchor_px`` / ``target_anchor`` use
+    the bottom-row-centre.  When the visual servo wants the finger to put
+    the bottom-row-centre at some target, it must aim the finger at
+    ``target − this_offset`` (plus the render lift on Y, applied in the
+    servo).  Returned as ``(Δx, Δy)`` so callers can compose.
+
+    Examples (using a 120 px cell):
+
+    * 1×4 horizontal bar — Δrow=0, Δcol=0   → ``(0, 0)``
+    * 4×1 vertical bar   — Δrow=1.5, Δcol=0 → ``(0, 180)``
+    * 3×3 square         — Δrow=1, Δcol=0   → ``(0, 120)``
+    * L-shape (0,0)(1,0)(1,1) — Δrow=0.5, Δcol=0.25 → ``(30, 60)``
+    """
+    cell_w = grid_box.fw / 8
+    cell_h = grid_box.fh / 8
+
+    # Bottom-row-centre in piece-grid coords (the "anchor" used by
+    # piece_anchor_px and target_anchor).
+    max_r        = max(r for r, _ in piece.cells)
+    bottom_cols  = [c for r, c in piece.cells if r == max_r]
+    anchor_row_f = float(max_r)
+    anchor_col_f = sum(bottom_cols) / len(bottom_cols)
+
+    # Geometric centre of the piece icon (where the finger actually grabs).
+    rows         = [r for r, _ in piece.cells]
+    cols         = [c for _, c in piece.cells]
+    center_row_f = sum(rows) / len(rows)
+    center_col_f = sum(cols) / len(cols)
+
+    dx_px = int(round((anchor_col_f - center_col_f) * cell_w))
+    dy_px = int(round((anchor_row_f - center_row_f) * cell_h))
+    return dx_px, dy_px
+
+
 def piece_anchor_px(
     grid_box: CalibrationBox,
     piece: Piece,

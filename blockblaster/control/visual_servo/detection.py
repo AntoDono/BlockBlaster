@@ -1,25 +1,32 @@
 """Held-piece detection from a single board scan.
 
-The visual-servo placer uses **one** detection signal: the same
-``scan_board`` output the recon panel renders.  Block Blast draws the
-dragged piece on top of the board, so as the player (or our automated
-finger) moves it, ``scan_board`` reads its cells as filled.  Subtract
-the placed cells we saw *before* the grab and what's left is the live
-position of the held piece.
+Block Blast renders the dragged piece in one of two ways depending on
+device / cell colour / valid-drop highlighting:
 
-No HSV ghost band, no "valid landing" preview detection, no separate
-classifier.  If the GUI's recon panel says the piece is on the target
-cell, the servo agrees by definition.
+* **Solid** — looks identical to a placed block.  ``scan_board`` reads
+  its cells as placed.
+* **Translucent** — alpha-blended over the cell.  ``scan_board`` reads
+  it as either ghost-band or (over a previously-placed cell) as *empty*
+  because the alpha drops the cell below the placed-threshold value.
+
+To handle both, detection is the **union of two signals** against the
+pre-grab snapshot of placed cells:
+
+1. *New appearances*: cells that scan as placed-or-ghost now but didn't
+   before.  Catches the piece sitting on empty board area.
+2. *Occlusions*: cells that *were* placed pre-grab and no longer scan
+   as placed.  Catches the piece sitting on top of existing blocks
+   (and the resulting "raw_scan dropped by N cells" trace).
+
+If the recon panel renders the piece, this layer agrees with it.
 """
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
 from blockblaster.assist.calibration import CalibrationBox
-from blockblaster.assist.scanner import scan_board
+from blockblaster.assist.scanner import scan_board, scan_board_with_ghost
 from blockblaster.control.coords import piece_anchor_px_from_cells
 from blockblaster.control.visual_servo.tunables import LOCK_TOLERANCE_PX
 
@@ -53,12 +60,28 @@ def detect_piece_cells(
 ) -> set[tuple[int, int]]:
     """Return the cells currently occupied by the held piece.
 
-    Computed as ``scan_board(frame) − initial_placed`` — the difference
-    isolates the moving piece from the permanently-placed blocks.
+    Combines two detection signals so the result is correct regardless
+    of how Block Blast is rendering the dragged piece:
+
+    * **New appearances** ``= (current_placed ∪ current_ghost) − initial_placed``
+      — cells that look filled / translucent *now* but didn't before.
+      This catches the piece floating over empty board cells whether
+      it's drawn solid or alpha-blended.
+    * **Occlusions** ``= initial_placed − current_placed``
+      — cells that *were* placed pre-grab and no longer scan as placed,
+      i.e. the piece is rendered on top of an existing block and
+      dragged the cell's measured V below the placed threshold.
+
+    Returns the union.  Either set being non-empty proves the piece is
+    somewhere on the calibrated board.
     """
-    placed = scan_board(frame, grid_box)
-    all_filled = {(int(r), int(c)) for r, c in zip(*placed.nonzero())}
-    return all_filled - initial_placed
+    placed, ghost = scan_board_with_ghost(frame, grid_box)
+    current_placed = {(int(r), int(c)) for r, c in zip(*placed.nonzero())}
+    current_ghost  = {(int(r), int(c)) for r, c in zip(*ghost.nonzero())}
+
+    new_appearances = (current_placed | current_ghost) - initial_placed
+    occlusions      = initial_placed - current_placed
+    return new_appearances | occlusions
 
 
 def is_locked(
