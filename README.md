@@ -14,9 +14,9 @@
 
 ### Demo
 
-<video src="assets/Blockblaster%20Demo.mp4" controls width="720"></video>
+![BlockBlaster auto-play demo](assets/Blockblaster_Demo.gif)
 
-> If the embed doesn't play, grab it directly: [`assets/Blockblaster Demo.mp4`](assets/Blockblaster%20Demo.mp4). The agent picks moves, the visual servo lands them on a real Android device.
+> The agent picks moves, the visual servo lands them on a real Android device. Full-resolution clip: [`assets/Blockblaster_Demo.mp4`](assets/Blockblaster_Demo.mp4).
 
 </div>
 
@@ -26,16 +26,42 @@
 
 Most "Block Blast AI" projects stop at search heuristics or a paper plot of MC returns. This repo runs the whole loop end-to-end:
 
-```
-┌────────────────────────┐    ┌────────────────────────┐    ┌────────────────────────┐
-│  1. Train v(s)         │    │  2. Perceive game      │    │  3. Act on the device  │
-│                        │    │                        │    │                        │
-│  • simulator           │    │  • scrcpy mirror       │    │  • advisor → suggestion│
-│  • CNN value head      │    │  • board / queue scan  │    │  • visual servo drags  │
-│  • Monte Carlo returns │ →  │  • piece classifier    │ →  │  • plant-gain learner  │
-│  • potential shaping   │    │  • live assist GUI     │    │  • per-device JSON     │
-│  • D4 augmentation     │    │  • ghost recon panel   │    │  • blind-commit guard  │
-└────────────────────────┘    └────────────────────────┘    └────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph TRAIN["**1. Train v(s)**"]
+        direction TB
+        T1["Simulator<br/>(pure-Python)"]
+        T2["CNN value head"]
+        T3["Monte Carlo returns"]
+        T4["Potential-based<br/>reward shaping"]
+        T5["D4 symmetry<br/>augmentation"]
+        T1 --> T2 --> T3 --> T4 --> T5
+    end
+
+    subgraph PERCEIVE["**2. Perceive game**"]
+        direction TB
+        P1["scrcpy mirror<br/>(live frames)"]
+        P2["Board / queue scanner<br/>(HSV + grid)"]
+        P3["Piece classifier CNN<br/>(synth-data trained)"]
+        P4["Assist GUI overlay<br/>+ ghost recon panel"]
+        P1 --> P2 --> P3 --> P4
+    end
+
+    subgraph ACT["**3. Act on the device**"]
+        direction TB
+        A1["Advisor → suggestion"]
+        A2["Visual servo drag<br/>(two-mode P controller)"]
+        A3["Online plant-gain<br/>learner (EMA)"]
+        A4["Per-device JSON cache"]
+        A5["Blind-commit guard"]
+        A1 --> A2 --> A3 --> A4 --> A5
+    end
+
+    TRAIN ==> PERCEIVE ==> ACT
+    ACT -. closed loop .-> PERCEIVE
+
+    classDef stage fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#e2e8f0
+    class TRAIN,PERCEIVE,ACT stage
 ```
 
 Each stage is a real, runnable subsystem — not a notebook stub. The agent that decides moves is the same agent that plays in simulation; the perception pipeline that draws overlays is the same one that feeds the action loop; the servo that drags pieces learns its own physics constants and persists them per phone.
