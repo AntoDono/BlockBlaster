@@ -1,6 +1,6 @@
-"""Entry point: launch the Block Blast assist side-by-side viewer."""
+"""Legacy entry point — equivalent to ``play.py --platform ios --mode assist``."""
 
-from blockblaster.assist.app import run
+from play import main
 
 if __name__ == "__main__":
-    run()
+    main(["--platform", "ios", "--mode", "assist"])

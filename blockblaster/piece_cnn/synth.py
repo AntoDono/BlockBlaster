@@ -1,14 +1,10 @@
 """Synthetic Block Blast piece renderer for training the queue CNN.
 
-Renders each canonical :class:`Piece` as a chamfered-cube grid (the
-recognisable Block Blast aesthetic) on a dark navy background.  Cells are
-drawn touching, with a thin black inter-cell border and lighter / darker
-edges to fake 3-D shading.  The renderer accepts random colour, cell
-pitch, position, and noise so the resulting samples cover the
-distribution we expect to see at inference time.
-
-The "empty" class (`piece=None`) renders just a noisy dark background so
-the classifier can learn to say "no piece in this slot".
+Renders each canonical :class:`Piece` as a chamfered-cube grid on a
+randomly-coloured background.  All rendering constants live in
+:mod:`blockblaster.piece_cnn.config`, colour helpers in
+:mod:`blockblaster.piece_cnn.color`, and drawing primitives in
+:mod:`blockblaster.piece_cnn.draw`.
 """
 
 from __future__ import annotations
@@ -20,497 +16,56 @@ import cv2
 import numpy as np
 
 from blockblaster.game.pieces import PIECES, Piece
+from blockblaster.piece_cnn.color import (
+    low_contrast_background,
+    per_cell_color,
+    random_background,
+    random_hsv,
+)
+from blockblaster.piece_cnn.config import (
+    BORDER_BLACK_PROB,
+    BORDER_FRAC_RANGE,
+    EMPTY_CLASS_ID,
+    GRADIENT_BEVEL_PROB,
+    INPUT_SIZE,
+    LOW_CONTRAST_PROB,
+    MIN_CELL_PX,
+    MULTI_COLOR_PROB,
+    NUM_CLASSES,
+    NUM_PIECES,
+    PIECE_SIZE_FRAC_RANGE,
+    ROTATION_JITTER_DEG,
+    SHADOW_PROB,
+    SHEAR_JITTER,
+    SLOT_ASPECT_WH_RANGE,
+    SLOT_HEIGHT_RANGE,
+)
+from blockblaster.piece_cnn.draw import (
+    draw_cell,
+    draw_piece_shadow,
+    maybe_apply_color_cast,
+    maybe_apply_jpeg,
+    maybe_apply_occlusion,
+)
 
-# Public constants
-NUM_PIECES = len(PIECES)
-EMPTY_CLASS_ID = NUM_PIECES            # class index for "empty slot"
-NUM_CLASSES   = NUM_PIECES + 1
-INPUT_SIZE    = 96                     # the CNN works on 96×96 RGB crops
-
-# Slot canvas sizes (before resize to INPUT_SIZE).  Real Block Blast
-# queue slots are taller than wide — measured ≈ 349×448 (aspect w/h ≈
-# 0.78) in our reference captures.  Render at higher resolution so the
-# final downsample to INPUT_SIZE bakes in realistic anti-aliasing, and
-# bias the aspect ratio toward tall slots so resized cells aren't square
-# when the model only ever sees vertically-squished real crops.
-SLOT_HEIGHT_RANGE    = (220, 460)
-SLOT_ASPECT_WH_RANGE = (0.55, 1.05)    # slot_w / slot_h
-
-# Fraction of the slot's *shorter* dimension that the piece's longest
-# axis should fill.  Real pieces sit in a lot of padding — typically
-# only 40–55% of the slot's short side.  Sampling this lets the model
-# see a wide range of piece-vs-padding ratios.
-PIECE_SIZE_FRAC_RANGE = (0.30, 0.65)
-MIN_CELL_PX           = 10             # never go below this even for big pieces
-
-# Background colour — sampled per-image across a wide HSV range so the
-# classifier doesn't lock onto "dark navy" as part of the piece signature.
-# Real game backgrounds vary considerably (different levels, brightness,
-# UI panel tints) so we cover dark→bright and any hue.
-BG_HUE_RANGE = (0, 179)                # any colour
-BG_SAT_RANGE = (0, 220)                # gray-ish to saturated
-BG_VAL_RANGE = (20, 210)               # dark to medium-bright
-BG_JITTER    = 18                      # per-channel noise on top of base
-
-# Block Blast palette covers many saturated hues.  We sample HSV to get
-# the same look for any colour the game might use.
-HSV_S_RANGE = (140, 240)
-HSV_V_RANGE = (170, 240)
-
-# Per-cell colour variation — real Block Blast pieces are sometimes a
-# uniform colour with subtle per-cell shading variation, and sometimes
-# pieces are made up of cells in totally different colours (e.g. clear
-# bonuses).  Match both regimes so the classifier doesn't lock onto
-# colour uniformity as a feature.
-PER_CELL_HUE_JITTER = 6                # ±degrees on H (0–179)
-PER_CELL_S_JITTER   = 30               # ±points on S
-PER_CELL_V_JITTER   = 25               # ±points on V
-MULTI_COLOR_PROB    = 0.20             # chance every cell is independently coloured
-
-# Geometric augmentation — small affine perturbations so the classifier
-# is robust to rotation and minor perspective skew from the phone capture.
-ROTATION_JITTER_DEG = 7.0              # ±degrees
-SHEAR_JITTER        = 0.06             # ±shear factor
-
-# Drop-shadow rendering — real Block Blast pieces cast a *subtle* soft
-# shadow to the bottom-right (much fainter than my first pass: alpha ≈
-# 0.10–0.25, small offset, light blur).
-SHADOW_PROB         = 0.9
-SHADOW_OFFSET_FRAC  = (0.05, 0.18)     # offset as a fraction of cell pitch
-SHADOW_ALPHA_RANGE  = (0.10, 0.28)
-SHADOW_BLUR_FRAC    = (0.08, 0.22)
-
-# Real game cells are drawn with a smooth top→bottom gradient (light
-# half on top, dark half on bottom).  Make this the dominant style.
-GRADIENT_BEVEL_PROB = 0.85
-
-# Cell border — the real game uses a *thin* border that is a darker
-# shade of the cell colour (not pure black).  We still occasionally use
-# a true black border so the model isn't fragile to either style.
-BORDER_FRAC_RANGE     = (0.04, 0.10)   # border thickness as fraction of cell pitch
-BORDER_BLACK_PROB     = 0.25           # chance to use pure black instead of dark-of-fill
-BORDER_DARKEN_FACTOR  = 0.45           # multiply fill colour by this for the border
-
-# Low-contrast regime — explicitly bias a fraction of samples so the
-# piece colour is close to the background colour (the failure mode the
-# original synth distribution rarely covered).
-LOW_CONTRAST_PROB   = 0.30
-LOW_CONTRAST_DV     = 50               # max |V_piece - V_bg|
-LOW_CONTRAST_DH     = 12               # max |H_piece - H_bg| (degrees)
-
-# JPEG-like compression artefacts (real phone screenshots are usually
-# re-compressed somewhere along the pipeline).
-JPEG_PROB           = 0.4
-JPEG_QUALITY_RANGE  = (45, 90)
-
-# Occasional global colour cast (camera white balance, screen tint).
-COLOR_CAST_PROB     = 0.35
-COLOR_CAST_MAX      = 18               # ±BGR offset per channel
-
-# Occasional small occlusion / UI overlay clipped into the slot
-# (notification, finger, banner).  Just a soft semi-transparent
-# rectangle at a random edge.
-OCCLUSION_PROB      = 0.10
-OCCLUSION_SIZE_FRAC = (0.05, 0.22)
+# Re-export public constants so callers can do
+#   from blockblaster.piece_cnn.synth import NUM_CLASSES
+__all__ = [
+    "EMPTY_CLASS_ID",
+    "INPUT_SIZE",
+    "NUM_CLASSES",
+    "NUM_PIECES",
+    "class_id_for",
+    "generate_batch",
+    "piece_for_class",
+    "pregenerate_dataset",
+    "render_piece_sample",
+]
 
 
 # ---------------------------------------------------------------------------
-# Colour helpers
+# Class-id helpers
 # ---------------------------------------------------------------------------
-
-def _hsv_to_bgr(h: int, s: int, v: int) -> tuple[int, int, int]:
-    hsv = np.array([[[h % 180, np.clip(s, 0, 255), np.clip(v, 0, 255)]]], dtype=np.uint8)
-    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
-    return int(bgr[0]), int(bgr[1]), int(bgr[2])
-
-
-def _random_hsv(rng: random.Random) -> tuple[int, int, int]:
-    return (
-        rng.randint(0, 179),
-        rng.randint(*HSV_S_RANGE),
-        rng.randint(*HSV_V_RANGE),
-    )
-
-
-def _random_piece_color(rng: random.Random) -> tuple[int, int, int]:
-    """Sample a saturated piece colour in BGR."""
-    return _hsv_to_bgr(*_random_hsv(rng))
-
-
-def _per_cell_color(
-    base_hsv: tuple[int, int, int],
-    rng: random.Random,
-    multi_color: bool,
-) -> tuple[int, int, int]:
-    """Return a BGR colour for one cell of a piece.
-
-    If ``multi_color`` is True we draw an independent random colour;
-    otherwise we apply a small HSV jitter around ``base_hsv`` so cells of
-    the same piece look related but not identical.
-    """
-    if multi_color:
-        return _hsv_to_bgr(*_random_hsv(rng))
-    h, s, v = base_hsv
-    h += rng.randint(-PER_CELL_HUE_JITTER, PER_CELL_HUE_JITTER)
-    s += rng.randint(-PER_CELL_S_JITTER, PER_CELL_S_JITTER)
-    v += rng.randint(-PER_CELL_V_JITTER, PER_CELL_V_JITTER)
-    return _hsv_to_bgr(h, s, v)
-
-
-def _scale_color(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
-    return (
-        int(np.clip(color[0] * factor, 0, 255)),
-        int(np.clip(color[1] * factor, 0, 255)),
-        int(np.clip(color[2] * factor, 0, 255)),
-    )
-
-
-def _random_background(
-    h: int,
-    w: int,
-    rng: random.Random,
-    forced_hsv: Optional[tuple[int, int, int]] = None,
-) -> np.ndarray:
-    """Solid background of a randomly-sampled colour, plus jitter / gradient.
-
-    The base colour spans the full hue range and a wide brightness band so
-    the classifier sees pieces on dark navy, light teal, mid-grey, even
-    bright purple-ish backgrounds.  This keeps the model from coupling
-    background colour to the "is a piece present?" decision.
-
-    Pass ``forced_hsv`` to override the random base colour (used by the
-    low-contrast regime to match the background tightly to the piece).
-    """
-    if forced_hsv is not None:
-        base_h, base_s, base_v = forced_hsv
-    else:
-        base_h = rng.randint(*BG_HUE_RANGE)
-        base_s = rng.randint(*BG_SAT_RANGE)
-        base_v = rng.randint(*BG_VAL_RANGE)
-    base_bgr = np.array(_hsv_to_bgr(base_h, base_s, base_v), dtype=np.int16)
-
-    bg = np.full((h, w, 3), base_bgr, dtype=np.int16)
-    # Per-pixel noise (uniform — fast and indistinguishable from gaussian
-    # at this magnitude).
-    noise = np.random.randint(-BG_JITTER, BG_JITTER + 1, (h, w, 3), dtype=np.int16)
-    bg += noise
-
-    # Optional brightness gradient (top→bottom or radial vignette).  Keeps
-    # the strength small so the bg still reads as one colour.
-    if rng.random() < 0.6:
-        kind = rng.random()
-        if kind < 0.5:
-            # Linear vertical gradient
-            grad = np.linspace(-15, 15, h, dtype=np.int16)[:, None, None]
-            bg += grad * rng.choice([-1, 1])
-        else:
-            # Radial vignette (corners darker)
-            cy, cx = h / 2, w / 2
-            ys, xs = np.indices((h, w))
-            dist = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) / max(h, w)
-            bg += (15 - 30 * dist).astype(np.int16)[..., None]
-
-    return np.clip(bg, 0, 255).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# Cell + piece rendering
-# ---------------------------------------------------------------------------
-
-def _draw_cell(
-    canvas: np.ndarray,
-    x: int,
-    y: int,
-    size: int,
-    color: tuple[int, int, int],
-    *,
-    gradient_bevel: bool = False,
-    border_frac: float = 0.07,
-    border_color: Optional[tuple[int, int, int]] = None,
-) -> None:
-    """Draw a single chamfered cell at (x, y) on `canvas`.
-
-    Parameters
-    ----------
-    gradient_bevel
-        When True the cell fill is a smooth top→bottom value gradient
-        (light → dark) instead of line-based bevel highlights.  Matches
-        the real game's look.
-    border_frac
-        Border thickness as a fraction of the cell pitch.
-    border_color
-        BGR colour for the outline.  Defaults to a darker shade of
-        ``color`` (which matches the real game); pass ``(0, 0, 0)`` for
-        the classic black border.
-    """
-    if size < 4:
-        return
-    # Border thickness scales with cell size so it survives the resize
-    # pipeline, but stays thin enough to look right at large pitches.
-    border = max(1, int(round(size * border_frac)))
-    inset  = border
-    fill_x0 = x + inset
-    fill_y0 = y + inset
-    fill_x1 = x + size - inset - 1
-    fill_y1 = y + size - inset - 1
-
-    if gradient_bevel:
-        fh = max(1, fill_y1 - fill_y0)
-        fw = max(1, fill_x1 - fill_x0)
-        light = np.array(_scale_color(color, 1.25), dtype=np.float32)
-        dark  = np.array(_scale_color(color, 0.62), dtype=np.float32)
-        ramp = np.linspace(0.0, 1.0, fh, dtype=np.float32)[:, None]
-        col  = (1.0 - ramp) * light + ramp * dark           # (fh, 3)
-        block = np.broadcast_to(col[:, None, :], (fh, fw, 3)).astype(np.uint8)
-        canvas[fill_y0:fill_y0 + fh, fill_x0:fill_x0 + fw] = block
-    else:
-        cv2.rectangle(canvas, (fill_x0, fill_y0), (fill_x1, fill_y1), color, -1)
-        light = _scale_color(color, 1.35)
-        dark  = _scale_color(color, 0.55)
-        bevel = max(1, size // 10)
-        cv2.line(canvas, (fill_x0, fill_y0), (fill_x1, fill_y0), light, bevel)
-        cv2.line(canvas, (fill_x0, fill_y0), (fill_x0, fill_y1), light, bevel)
-        cv2.line(canvas, (fill_x0, fill_y1), (fill_x1, fill_y1), dark, bevel)
-        cv2.line(canvas, (fill_x1, fill_y0), (fill_x1, fill_y1), dark, bevel)
-
-    if border_color is None:
-        border_color = _scale_color(color, BORDER_DARKEN_FACTOR)
-    # Cell outline → this is what separates touching cells inside a
-    # piece and is what lets the CNN count cells after downsampling.
-    cv2.rectangle(
-        canvas,
-        (x, y),
-        (x + size - 1, y + size - 1),
-        border_color,
-        border,
-    )
-
-
-def _draw_piece_shadow(
-    canvas: np.ndarray,
-    piece: Piece,
-    ox: int,
-    oy: int,
-    cell_px: int,
-    rng: random.Random,
-) -> None:
-    """Composite a soft drop-shadow of the piece onto ``canvas`` in-place.
-
-    Renders the piece's silhouette (one filled rectangle per cell) into a
-    separate single-channel alpha mask, offsets it bottom-right, gaussian
-    blurs it, then alpha-blends a darkened version of the canvas through
-    that mask.  The result looks like a real Block Blast piece shadow:
-    soft, slightly offset, the shape of the piece itself.
-    """
-    h, w = canvas.shape[:2]
-    dx = int(round(cell_px * rng.uniform(*SHADOW_OFFSET_FRAC)))
-    dy = int(round(cell_px * rng.uniform(*SHADOW_OFFSET_FRAC)))
-    alpha_peak = rng.uniform(*SHADOW_ALPHA_RANGE)
-
-    alpha = np.zeros((h, w), dtype=np.float32)
-    for r, c in piece.cells:
-        x0 = ox + c * cell_px + dx
-        y0 = oy + r * cell_px + dy
-        x1 = x0 + cell_px
-        y1 = y0 + cell_px
-        x0c, y0c = max(0, x0), max(0, y0)
-        x1c, y1c = min(w, x1), min(h, y1)
-        if x1c <= x0c or y1c <= y0c:
-            continue
-        alpha[y0c:y1c, x0c:x1c] = alpha_peak
-
-    if alpha.max() == 0:
-        return
-
-    sigma = max(0.5, cell_px * rng.uniform(*SHADOW_BLUR_FRAC))
-    k = int(sigma * 4) | 1   # odd kernel covering ±2σ
-    alpha = cv2.GaussianBlur(alpha, (k, k), sigma)
-    alpha = np.clip(alpha, 0.0, 1.0)[..., None]
-
-    canvas[:] = (canvas.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
-
-
-def _maybe_apply_occlusion(
-    canvas: np.ndarray, rng: random.Random
-) -> None:
-    """Optionally darken / blank a small strip at one edge of the slot."""
-    if rng.random() >= OCCLUSION_PROB:
-        return
-    h, w = canvas.shape[:2]
-    edge = rng.choice(("top", "bottom", "left", "right"))
-    frac = rng.uniform(*OCCLUSION_SIZE_FRAC)
-    color = np.array(
-        [rng.randint(0, 60), rng.randint(0, 60), rng.randint(0, 60)],
-        dtype=np.uint8,
-    )
-    alpha = rng.uniform(0.4, 0.9)
-    if edge == "top":
-        sl = (slice(0, max(1, int(h * frac))), slice(None))
-    elif edge == "bottom":
-        sl = (slice(h - max(1, int(h * frac)), h), slice(None))
-    elif edge == "left":
-        sl = (slice(None), slice(0, max(1, int(w * frac))))
-    else:
-        sl = (slice(None), slice(w - max(1, int(w * frac)), w))
-    region = canvas[sl].astype(np.float32)
-    canvas[sl] = (region * (1.0 - alpha) + color * alpha).astype(np.uint8)
-
-
-def _maybe_apply_jpeg(canvas: np.ndarray, rng: random.Random) -> np.ndarray:
-    """Round-trip through JPEG encode/decode to inject realistic artefacts."""
-    if rng.random() >= JPEG_PROB:
-        return canvas
-    q = rng.randint(*JPEG_QUALITY_RANGE)
-    ok, buf = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-    if not ok:
-        return canvas
-    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
-
-
-def _maybe_apply_color_cast(canvas: np.ndarray, rng: random.Random) -> np.ndarray:
-    """Apply a small per-channel BGR offset (white-balance / screen tint)."""
-    if rng.random() >= COLOR_CAST_PROB:
-        return canvas
-    cast = np.array(
-        [rng.randint(-COLOR_CAST_MAX, COLOR_CAST_MAX) for _ in range(3)],
-        dtype=np.int16,
-    )
-    return np.clip(canvas.astype(np.int16) + cast, 0, 255).astype(np.uint8)
-
-
-def _low_contrast_background(
-    piece_hsv: tuple[int, int, int], rng: random.Random
-) -> tuple[int, int, int]:
-    """Sample a background HSV close to the piece HSV (low-contrast regime)."""
-    h, _s, v = piece_hsv
-    bg_h = (h + rng.randint(-LOW_CONTRAST_DH, LOW_CONTRAST_DH)) % 180
-    bg_s = rng.randint(60, 220)
-    dv = rng.randint(-LOW_CONTRAST_DV, LOW_CONTRAST_DV)
-    # Bias slightly darker than the piece (matches real game UI panels).
-    bg_v = int(np.clip(v + dv - 25, 15, 230))
-    return bg_h, bg_s, bg_v
-
-
-def render_piece_sample(
-    piece: Optional[Piece],
-    rng: random.Random,
-    slot_h: Optional[int] = None,
-    slot_w: Optional[int] = None,
-    cell_px: Optional[int] = None,
-) -> np.ndarray:
-    """Render one synthetic slot crop (BGR uint8) of `INPUT_SIZE × INPUT_SIZE`.
-
-    Pass `piece=None` to render an empty slot.  Random parameters are drawn
-    from the configured ranges unless overridden via the keyword args.
-    """
-    if slot_h is None:
-        slot_h = rng.randint(*SLOT_HEIGHT_RANGE)
-    if slot_w is None:
-        slot_w = max(40, int(round(slot_h * rng.uniform(*SLOT_ASPECT_WH_RANGE))))
-
-    # If we're rendering a piece, decide *before* drawing the background
-    # whether to enter the low-contrast regime so we can match the bg
-    # colour to the piece colour.
-    base_hsv: Optional[tuple[int, int, int]] = None
-    forced_bg_hsv: Optional[tuple[int, int, int]] = None
-    if piece is not None:
-        base_hsv = _random_hsv(rng)
-        if rng.random() < LOW_CONTRAST_PROB:
-            forced_bg_hsv = _low_contrast_background(base_hsv, rng)
-
-    canvas = _random_background(slot_h, slot_w, rng, forced_hsv=forced_bg_hsv)
-
-    if piece is not None:
-        assert base_hsv is not None  # set above
-        if cell_px is None:
-            # Size the piece relative to the slot's *shorter* dimension so
-            # the piece sits in a realistic amount of padding (real
-            # crops show ~40–55% fill of the short side).
-            target_frac = rng.uniform(*PIECE_SIZE_FRAC_RANGE)
-            short_dim   = min(slot_w, slot_h)
-            longest     = max(piece.rows, piece.cols)
-            cell_px     = max(MIN_CELL_PX, int(target_frac * short_dim / longest))
-        # Hard cap so we don't overflow the slot for elongated pieces.
-        max_cell_w = max(MIN_CELL_PX, (slot_w - 8) // piece.cols)
-        max_cell_h = max(MIN_CELL_PX, (slot_h - 8) // piece.rows)
-        cell_px = max(MIN_CELL_PX, min(cell_px, max_cell_w, max_cell_h))
-
-        piece_w = piece.cols * cell_px
-        piece_h = piece.rows * cell_px
-        # Centre with random jitter (±25% of the remaining padding)
-        free_x = max(0, slot_w - piece_w)
-        free_y = max(0, slot_h - piece_h)
-        jitter_x = free_x // 4
-        jitter_y = free_y // 4
-        ox = free_x // 2 + (rng.randint(-jitter_x, jitter_x) if jitter_x > 0 else 0)
-        oy = free_y // 2 + (rng.randint(-jitter_y, jitter_y) if jitter_y > 0 else 0)
-        ox = int(np.clip(ox, 0, slot_w - piece_w))
-        oy = int(np.clip(oy, 0, slot_h - piece_h))
-
-        # Drop shadow first, so the piece sits on top of it.
-        if rng.random() < SHADOW_PROB:
-            _draw_piece_shadow(canvas, piece, ox, oy, cell_px, rng)
-
-        multi_color = rng.random() < MULTI_COLOR_PROB
-        use_gradient_bevel = rng.random() < GRADIENT_BEVEL_PROB
-        border_frac = rng.uniform(*BORDER_FRAC_RANGE)
-        use_black_border = rng.random() < BORDER_BLACK_PROB
-        for r, c in piece.cells:
-            cell_color = _per_cell_color(base_hsv, rng, multi_color)
-            border_color = (0, 0, 0) if use_black_border else None
-            _draw_cell(
-                canvas,
-                ox + c * cell_px,
-                oy + r * cell_px,
-                cell_px,
-                cell_color,
-                gradient_bevel=use_gradient_bevel,
-                border_frac=border_frac,
-                border_color=border_color,
-            )
-
-    # Slight rotation + shear to mimic phone-capture skew (only when a
-    # piece is present — avoids waste on blank backgrounds).
-    if piece is not None and rng.random() < 0.7:
-        angle = rng.uniform(-ROTATION_JITTER_DEG, ROTATION_JITTER_DEG)
-        shear = rng.uniform(-SHEAR_JITTER, SHEAR_JITTER)
-        ch, cw = canvas.shape[:2]
-        M = cv2.getRotationMatrix2D((cw / 2, ch / 2), angle, 1.0)
-        # Inject shear directly into the affine matrix
-        M[0, 1] += shear
-        M[1, 0] += shear * 0.5
-        canvas = cv2.warpAffine(
-            canvas, M, (cw, ch),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REPLICATE,
-        )
-
-    # Optional gentle blur to mimic device downsampling
-    if rng.random() < 0.4:
-        k = rng.choice([3, 5])
-        canvas = cv2.GaussianBlur(canvas, (k, k), 0)
-
-    # Optional brightness / contrast jitter
-    if rng.random() < 0.6:
-        alpha = 0.85 + rng.random() * 0.3      # contrast
-        beta  = -10 + rng.randint(0, 20)        # brightness
-        canvas = np.clip(canvas.astype(np.int16) * alpha + beta, 0, 255).astype(np.uint8)
-
-    # Optional global colour cast (camera white balance / screen tint)
-    canvas = _maybe_apply_color_cast(canvas, rng)
-
-    # Optional small edge occlusion (banner, finger, UI bar clipped in)
-    _maybe_apply_occlusion(canvas, rng)
-
-    # Resize to model input
-    canvas = cv2.resize(canvas, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
-
-    # JPEG round-trip after resize so the artefacts land at model
-    # resolution, matching what a recompressed phone screenshot looks
-    # like by the time it reaches the classifier.
-    canvas = _maybe_apply_jpeg(canvas, rng)
-    return canvas
-
 
 def class_id_for(piece: Optional[Piece]) -> int:
     """Map a Piece (or None for empty) to its class id."""
@@ -528,7 +83,112 @@ def piece_for_class(class_id: int) -> Optional[Piece]:
 
 
 # ---------------------------------------------------------------------------
-# Batch generator (used by the trainer)
+# Sample renderer
+# ---------------------------------------------------------------------------
+
+def render_piece_sample(
+    piece: Optional[Piece],
+    rng: random.Random,
+    slot_h: Optional[int] = None,
+    slot_w: Optional[int] = None,
+    cell_px: Optional[int] = None,
+) -> np.ndarray:
+    """Render one synthetic slot crop (BGR uint8, ``INPUT_SIZE × INPUT_SIZE``).
+
+    Pass ``piece=None`` to render an empty slot.  Random parameters are drawn
+    from the configured ranges unless overridden via keyword args.
+    """
+    if slot_h is None:
+        slot_h = rng.randint(*SLOT_HEIGHT_RANGE)
+    if slot_w is None:
+        slot_w = max(40, int(round(slot_h * rng.uniform(*SLOT_ASPECT_WH_RANGE))))
+
+    # Decide before drawing the background whether to enter the low-contrast
+    # regime so the bg colour can be matched to the piece colour.
+    base_hsv: Optional[tuple[int, int, int]] = None
+    forced_bg_hsv: Optional[tuple[int, int, int]] = None
+    if piece is not None:
+        base_hsv = random_hsv(rng)
+        if rng.random() < LOW_CONTRAST_PROB:
+            forced_bg_hsv = low_contrast_background(base_hsv, rng)
+
+    canvas = random_background(slot_h, slot_w, rng, forced_hsv=forced_bg_hsv)
+
+    if piece is not None:
+        assert base_hsv is not None
+        if cell_px is None:
+            target_frac = rng.uniform(*PIECE_SIZE_FRAC_RANGE)
+            short_dim   = min(slot_w, slot_h)
+            longest     = max(piece.rows, piece.cols)
+            cell_px     = max(MIN_CELL_PX, int(target_frac * short_dim / longest))
+        max_cell_w = max(MIN_CELL_PX, (slot_w - 8) // piece.cols)
+        max_cell_h = max(MIN_CELL_PX, (slot_h - 8) // piece.rows)
+        cell_px    = max(MIN_CELL_PX, min(cell_px, max_cell_w, max_cell_h))
+
+        piece_w = piece.cols * cell_px
+        piece_h = piece.rows * cell_px
+        free_x  = max(0, slot_w - piece_w)
+        free_y  = max(0, slot_h - piece_h)
+        jx      = free_x // 4
+        jy      = free_y // 4
+        ox = free_x // 2 + (rng.randint(-jx, jx) if jx > 0 else 0)
+        oy = free_y // 2 + (rng.randint(-jy, jy) if jy > 0 else 0)
+        ox = int(np.clip(ox, 0, slot_w - piece_w))
+        oy = int(np.clip(oy, 0, slot_h - piece_h))
+
+        if rng.random() < SHADOW_PROB:
+            draw_piece_shadow(canvas, piece, ox, oy, cell_px, rng)
+
+        multi_color         = rng.random() < MULTI_COLOR_PROB
+        use_gradient_bevel  = rng.random() < GRADIENT_BEVEL_PROB
+        border_frac         = rng.uniform(*BORDER_FRAC_RANGE)
+        use_black_border    = rng.random() < BORDER_BLACK_PROB
+
+        for r, c in piece.cells:
+            cell_color   = per_cell_color(base_hsv, rng, multi_color)
+            border_color = (0, 0, 0) if use_black_border else None
+            draw_cell(
+                canvas,
+                ox + c * cell_px,
+                oy + r * cell_px,
+                cell_px,
+                cell_color,
+                gradient_bevel=use_gradient_bevel,
+                border_frac=border_frac,
+                border_color=border_color,
+            )
+
+    if piece is not None and rng.random() < 0.7:
+        angle = rng.uniform(-ROTATION_JITTER_DEG, ROTATION_JITTER_DEG)
+        shear = rng.uniform(-SHEAR_JITTER, SHEAR_JITTER)
+        ch, cw = canvas.shape[:2]
+        M = cv2.getRotationMatrix2D((cw / 2, ch / 2), angle, 1.0)
+        M[0, 1] += shear
+        M[1, 0] += shear * 0.5
+        canvas = cv2.warpAffine(
+            canvas, M, (cw, ch),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+
+    if rng.random() < 0.4:
+        k      = rng.choice([3, 5])
+        canvas = cv2.GaussianBlur(canvas, (k, k), 0)
+
+    if rng.random() < 0.6:
+        alpha  = 0.85 + rng.random() * 0.3
+        beta   = -10 + rng.randint(0, 20)
+        canvas = np.clip(canvas.astype(np.int16) * alpha + beta, 0, 255).astype(np.uint8)
+
+    canvas = maybe_apply_color_cast(canvas, rng)
+    maybe_apply_occlusion(canvas, rng)
+    canvas = cv2.resize(canvas, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
+    canvas = maybe_apply_jpeg(canvas, rng)
+    return canvas
+
+
+# ---------------------------------------------------------------------------
+# Batch generator
 # ---------------------------------------------------------------------------
 
 def generate_batch(
@@ -544,21 +204,17 @@ def generate_batch(
     images = np.empty((batch_size, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     labels = np.empty((batch_size,), dtype=np.int64)
     for i in range(batch_size):
-        if rng.random() < empty_fraction:
-            piece = None
-        else:
-            piece = rng.choice(PIECES)
+        piece     = None if rng.random() < empty_fraction else rng.choice(PIECES)
         images[i] = render_piece_sample(piece, rng)
         labels[i] = class_id_for(piece)
     return images, labels
 
 
 # ---------------------------------------------------------------------------
-# Parallel pre-generation (used by the trainer for one-shot dataset build)
+# Parallel pre-generation
 # ---------------------------------------------------------------------------
 
 def _worker_chunk(args: tuple[int, int, float]) -> tuple[np.ndarray, np.ndarray]:
-    """Worker entry: generate `chunk_size` samples with a deterministic seed."""
     seed, chunk_size, empty_fraction = args
     rng = random.Random(seed)
     return generate_batch(chunk_size, rng, empty_fraction=empty_fraction)
@@ -572,41 +228,29 @@ def pregenerate_dataset(
     seed: int = 0,
     desc: str = "pregen",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Render `n_samples` synthetic images in parallel and return them in RAM.
+    """Render ``n_samples`` synthetic images in parallel and return them in RAM.
 
-    Args:
-        n_samples:      how many examples to generate in total.
-        n_workers:      parallel processes (1 = serial, in-process).
-        empty_fraction: fraction of samples that are empty slots.
-        chunk_size:     samples per worker task; smaller = finer progress
-                        updates, larger = lower IPC overhead.
-        seed:           base seed for reproducibility (each chunk gets a
-                        derived seed so workers don't produce identical data).
-        desc:           label shown on the tqdm progress bar.
-
-    Returns:
-        (images, labels) where images is uint8 ``(N, INPUT_SIZE, INPUT_SIZE, 3)``
-        and labels is int64 ``(N,)``.
+    Returns ``(images, labels)`` where images is uint8
+    ``(N, INPUT_SIZE, INPUT_SIZE, 3)`` and labels is int64 ``(N,)``.
     """
     from tqdm import tqdm
 
     n_chunks = (n_samples + chunk_size - 1) // chunk_size
-    tasks = [
+    tasks    = [
         (seed + i, min(chunk_size, n_samples - i * chunk_size), empty_fraction)
         for i in range(n_chunks)
     ]
 
-    images = np.empty((n_samples, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
-    labels = np.empty((n_samples,), dtype=np.int64)
+    images  = np.empty((n_samples, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
+    labels  = np.empty((n_samples,), dtype=np.int64)
     written = 0
 
     if n_workers <= 1:
-        iterator = (_worker_chunk(args) for args in tasks)
+        iterator = (_worker_chunk(a) for a in tasks)
     else:
-        # Use spawn explicitly — safer than fork when CUDA is initialised.
         from multiprocessing import get_context
-        ctx = get_context("spawn")
-        pool = ctx.Pool(processes=n_workers)
+        ctx      = get_context("spawn")
+        pool     = ctx.Pool(processes=n_workers)
         iterator = pool.imap_unordered(_worker_chunk, tasks)
 
     try:

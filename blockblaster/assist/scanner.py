@@ -23,42 +23,137 @@ BOARD_SIZE    = 8
 SAT_THRESHOLD = 60    # HSV S 0–255; blocks are vivid
 VAL_THRESHOLD = 130   # HSV V 0–255; filled block centres ~200-235, empty cells ~80-92
 
+# Ghost / drag-preview band.  When the player holds a piece over the board,
+# Block Blast renders the target cells as a dimmer, still-saturated tint of
+# the piece's colour.  These cells are brighter than the dark-navy empty
+# background but noticeably dimmer than a placed block.  Sample values seen
+# in practice sit roughly in V≈[95, 130) with S≳40.
+GHOST_SAT_MIN = 40
+GHOST_VAL_MIN = 95
+GHOST_VAL_MAX = VAL_THRESHOLD   # exclusive upper bound; placed picks up at this V
+
+
+def _board_hsv(
+    frame_bgr: np.ndarray, box: CalibrationBox,
+) -> tuple[np.ndarray, int, int]:
+    """Crop, resize to a fixed 256×256, convert to HSV.  Returns (hsv, cell_px, half).
+
+    Returns ``(None, 0, 0)`` semantics via raising on empty crop — callers in
+    this module wrap with their own validity checks.
+    """
+    fh, fw = frame_bgr.shape[:2]
+    x1 = max(0, box.fx)
+    y1 = max(0, box.fy)
+    x2 = min(fw, box.fx + box.fw)
+    y2 = min(fh, box.fy + box.fh)
+    crop = frame_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        raise ValueError("empty crop")
+
+    target_px = BOARD_SIZE * 32
+    crop_resized = cv2.resize(crop, (target_px, target_px), interpolation=cv2.INTER_LINEAR)
+    hsv = cv2.cvtColor(crop_resized, cv2.COLOR_BGR2HSV)
+    cell_px = target_px // BOARD_SIZE
+    half    = cell_px // 2
+    return hsv, cell_px, half
+
 
 def scan_board(frame_bgr: np.ndarray, box: CalibrationBox) -> np.ndarray:
-    """Return an (8, 8) bool ndarray: True = cell filled, False = empty.
+    """Return an (8, 8) bool ndarray: True = cell filled (placed), False = empty.
 
     Returns an all-False grid if the box is invalid or the crop is degenerate.
     """
     if not box.is_valid():
         return np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
 
-    fh, fw = frame_bgr.shape[:2]
-    x1 = max(0, box.fx)
-    y1 = max(0, box.fy)
-    x2 = min(fw, box.fx + box.fw)
-    y2 = min(fh, box.fy + box.fh)
-
-    crop = frame_bgr[y1:y2, x1:x2]
-    if crop.size == 0:
+    try:
+        hsv, cell_px, half = _board_hsv(frame_bgr, box)
+    except ValueError:
         return np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
-
-    # Resize to a fixed resolution so cell boundaries are exact integer pixels
-    target_px = BOARD_SIZE * 32   # 256×256, divisible by 8
-    crop_resized = cv2.resize(crop, (target_px, target_px), interpolation=cv2.INTER_LINEAR)
-
-    hsv = cv2.cvtColor(crop_resized, cv2.COLOR_BGR2HSV)
-    cell_px = target_px // BOARD_SIZE   # 32 px per cell
-    half    = cell_px // 2
 
     grid = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
     for row in range(BOARD_SIZE):
         for col in range(BOARD_SIZE):
             cy = row * cell_px + half
             cx = col * cell_px + half
-            # Sample a 9×9 patch well inside the cell (cell is 32px wide)
             patch = hsv[cy - 4 : cy + 5, cx - 4 : cx + 5]
-            sat = float(patch[:, :, 1].mean())   # S channel
-            val = float(patch[:, :, 2].mean())   # V channel
+            sat = float(patch[:, :, 1].mean())
+            val = float(patch[:, :, 2].mean())
             grid[row, col] = sat > SAT_THRESHOLD and val > VAL_THRESHOLD
 
     return grid
+
+
+def scan_board_with_ghost(
+    frame_bgr: np.ndarray, box: CalibrationBox,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(placed, ghost)`` 8×8 bool grids.
+
+    ``placed`` matches :func:`scan_board` exactly.
+
+    ``ghost`` is True for cells that look like the translucent
+    drag-preview render — saturated tint dimmer than a placed block but
+    brighter than the empty navy background.  Useful for the closed-loop
+    visual-servo placer which watches where the game thinks the piece
+    will land while the finger is held down.
+
+    Both grids return all-False if the box is invalid or the crop is
+    degenerate.
+    """
+    empty = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
+    if not box.is_valid():
+        return empty, empty.copy()
+
+    try:
+        hsv, cell_px, half = _board_hsv(frame_bgr, box)
+    except ValueError:
+        return empty, empty.copy()
+
+    placed = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
+    ghost  = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+            cy = row * cell_px + half
+            cx = col * cell_px + half
+            patch = hsv[cy - 4 : cy + 5, cx - 4 : cx + 5]
+            sat = float(patch[:, :, 1].mean())
+            val = float(patch[:, :, 2].mean())
+            if sat > SAT_THRESHOLD and val > VAL_THRESHOLD:
+                placed[row, col] = True
+            elif sat > GHOST_SAT_MIN and GHOST_VAL_MIN <= val < GHOST_VAL_MAX:
+                ghost[row, col] = True
+
+    return placed, ghost
+
+
+def write_ghost_overlay(
+    frame_bgr: np.ndarray, box: CalibrationBox, out_path: str,
+) -> None:
+    """Debug helper: save an overlay annotating ``placed`` (green) and
+    ``ghost`` (yellow) cells over the cropped board.  Used to tune the
+    ghost HSV band against a real held-drag screenshot.
+    """
+    if not box.is_valid():
+        return
+    fh, fw = frame_bgr.shape[:2]
+    x1 = max(0, box.fx); y1 = max(0, box.fy)
+    x2 = min(fw, box.fx + box.fw); y2 = min(fh, box.fy + box.fh)
+    crop = frame_bgr[y1:y2, x1:x2].copy()
+    if crop.size == 0:
+        return
+
+    placed, ghost = scan_board_with_ghost(frame_bgr, box)
+    ch, cw = crop.shape[:2]
+    cell_w = cw / BOARD_SIZE
+    cell_h = ch / BOARD_SIZE
+    overlay = crop.copy()
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+            x = int(col * cell_w); y = int(row * cell_h)
+            xe = int((col + 1) * cell_w); ye = int((row + 1) * cell_h)
+            if placed[row, col]:
+                cv2.rectangle(overlay, (x, y), (xe, ye), (0, 220, 0), 2)
+            elif ghost[row, col]:
+                cv2.rectangle(overlay, (x, y), (xe, ye), (0, 220, 220), 2)
+    blended = cv2.addWeighted(overlay, 0.7, crop, 0.3, 0)
+    cv2.imwrite(out_path, blended)

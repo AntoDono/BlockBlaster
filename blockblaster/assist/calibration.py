@@ -21,7 +21,12 @@ from typing import Optional
 
 import pygame
 
-CONFIG_PATH = Path("assist_config.json")
+CONFIG_PATH = Path("assist_config.json")          # default / backward-compat
+
+_PLATFORM_PATHS: dict[str, Path] = {
+    "ios":     Path("assist_config_ios.json"),
+    "android": Path("assist_config_android.json"),
+}
 
 
 @dataclass
@@ -95,7 +100,17 @@ class CalibrationConfig:
     # Persistence
     # ------------------------------------------------------------------
 
-    def save(self, path: Path = CONFIG_PATH) -> None:
+    def save(
+        self,
+        path: Optional[Path] = None,
+        platform: Optional[str] = None,
+    ) -> None:
+        """Persist to JSON.
+
+        Priority: explicit *path* > *platform* lookup > default :data:`CONFIG_PATH`.
+        """
+        if path is None:
+            path = _PLATFORM_PATHS.get(platform or "", CONFIG_PATH)
         data: dict = {}
         if self.grid is not None:
             data["grid"] = asdict(self.grid)
@@ -104,8 +119,17 @@ class CalibrationConfig:
         path.write_text(json.dumps(data, indent=2))
 
     @staticmethod
-    def load(path: Path = CONFIG_PATH) -> "CalibrationConfig":
-        """Load from JSON.  Returns an empty config on any error."""
+    def load(
+        path: Optional[Path] = None,
+        platform: Optional[str] = None,
+    ) -> "CalibrationConfig":
+        """Load from JSON.  Returns an empty config on any error.
+
+        Priority: explicit *path* > *platform* lookup > default :data:`CONFIG_PATH`.
+        Falls back to the legacy default path so existing configs are not lost.
+        """
+        if path is None:
+            path = _PLATFORM_PATHS.get(platform or "", CONFIG_PATH)
         cfg = CalibrationConfig()
         try:
             data = json.loads(path.read_text())

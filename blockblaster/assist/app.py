@@ -1,16 +1,30 @@
-"""Pygame application loop for the assist side-by-side viewer."""
+"""Pygame application loop for the assist side-by-side viewer.
+
+The run loop here is intentionally narrow:
+
+* Event handling lives in :mod:`app_events`.
+* Auto-play move execution lives in :mod:`app_autoplay`.
+* Controls panel, calibration status overlay, and status bar live in :mod:`app_overlay`.
+* All mutable session state is bundled into :class:`AppState`.
+"""
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import pygame
 
 from blockblaster.assist.advisor import Advisor
-from blockblaster.assist.calibration import CalibrationBox, CalibrationConfig
-from blockblaster.assist.device_stream import DeviceStream
+from blockblaster.assist.analyzer import AnalysisWorker
+from blockblaster.assist.app_autoplay import maybe_execute_auto_swipe
+from blockblaster.assist.app_events import dispatch_event
+from blockblaster.assist.app_overlay import draw_controls_panel
+from blockblaster.assist.app_state import AppState
+from blockblaster.assist.calibration import CalibrationConfig
 from blockblaster.assist.layout import (
     BG_COLOR,
+    CONTROLS_RECT,
     PHONE_RECT,
     RECON_RECT,
     STATUS_RECT,
@@ -26,26 +40,45 @@ from blockblaster.assist.render import (
     draw_recon_panel,
     draw_status_bar,
     draw_suggestion_on_phone,
+    draw_swipe_arrow_on_phone,
 )
-from blockblaster.assist.scanner import scan_board
+from blockblaster.control.device import Device
 from blockblaster.game.board import Board
 
-# Calibration modes
-MODE_GRID   = "grid"
-MODE_PIECES = "pieces"
+_TARGET_FPS = 60   # render-thread cap; analysis runs on its own worker thread
 
 
-def run() -> None:
+def run(
+    device: Optional[Device] = None,
+    platform: Optional[str] = None,
+    auto_play: bool = False,
+) -> None:
     """Launch the assist viewer window.
 
-    Left panel:  live iOS phone screen (via tunneld/DVT).
-    Right panel: reconstructed Block Blast scene from the scanned grid.
+    Left panel:  live phone screen (iOS DVT or Android ADB).
+    Right panel: reconstructed Block Blast scene + AI suggestion.
 
-    Controls:
+    Parameters
+    ----------
+    device:
+        Optional pre-built device.  Defaults to iOS read-only.
+    platform:
+        ``"ios"`` or ``"android"`` — selects platform-specific calibration file.
+    auto_play:
+        Ignored — auto-play is always off when the GUI opens.  Use the
+        **Auto-play** chip or press ``A`` to enable it after launch.
+
+    Controls
+    --------
         Tab                 – toggle calibration mode (GRID / PIECES)
+        A                   – toggle auto-play on/off
         Drag on left panel  – set bounding box for the active mode
         R                   – clear the active mode's box
+        D                   – dump per-slot debug images
         Q / ESC             – quit
+
+    The chip buttons at the bottom of the window mirror every keyboard
+    shortcut; click them instead of pressing keys.
     """
     pygame.init()
     pygame.font.init()
@@ -56,122 +89,117 @@ def run() -> None:
     screen = make_window()
     clock  = pygame.time.Clock()
 
-    board = Board()
-    queue: list = []
-    queue_confidences: list[float] = []
-
-    # Load persisted calibration (both slots)
-    cfg = CalibrationConfig.load()
-
-    # Piece recognizer (pre-computes one template per piece at init)
+    # ── Long-lived collaborators ────────────────────────────────────────
+    cfg        = CalibrationConfig.load(platform=platform)
     recognizer = PieceRecognizer()
-
-    # Move advisor (loads ValueNet from model.pt; degrades gracefully if missing)
-    advisor = Advisor()
+    advisor    = Advisor()
     if advisor.last_error:
         print(f"[assist] advisor disabled: {advisor.last_error}")
 
-    # Active calibration mode
-    calib_mode: str = MODE_GRID
-
-    # Drag state
-    drag_start: Optional[tuple[int, int]] = None
-    drag_cur:   Optional[tuple[int, int]] = None
-
-    # Last render info for coordinate mapping
-    _scale:   float = 1.0
-    _blit_x:  int   = 0
-    _blit_y:  int   = 0
-    _frame_w: int   = 1
-    _frame_h: int   = 1
-
-    stream = DeviceStream()
+    if device is None:
+        from blockblaster.control.ios_readonly import IosReadOnlyDevice
+        device = IosReadOnlyDevice()
+    stream = device
     stream.start()
 
-    # Cached phone-panel surface (regenerated only when the frame changes
-    # OR when the panel rect changes — neither happens often)
+    analyzer = AnalysisWorker(
+        device=stream, cfg=cfg, recognizer=recognizer, advisor=advisor,
+    )
+    analyzer.start()
+
+    # ── Session state ───────────────────────────────────────────────────
+    state = AppState(
+        cfg=cfg,
+        platform=platform,
+        board=Board(),
+    )
+    # Auto-play is always OFF on startup — user must click the chip or press A.
+    state.auto_enabled = False
+    if auto_play:
+        print("[assist] auto_play flag is ignored — click Auto-play or press A to enable.")
+
+    queue: list = []
+    queue_confidences: list[float] = []
+
+    # Caches keyed by content — avoid re-blitting / re-rendering identical frames
     phone_cache: Optional[tuple] = None  # (frame_id, surf, scale, blit_x, blit_y)
-    last_processed_frame_id: int = -1
+    recon_cache_key:  Optional[tuple] = None
+    recon_cache_surf: Optional[pygame.Surface] = None
+    last_analysis_frame_id: int = -1
+
+    # ADB / device FPS counter — counts unique frame_id changes per second
+    _adb_fps_window_start: float = time.monotonic()
+    _adb_frame_count: int = 0
+    _adb_fps: float = 0.0
+    _prev_frame_id: int = -1
 
     running = True
     while running:
         frame, frame_id = stream.get_latest_with_id()
-        frame_changed = frame is not None and frame_id != last_processed_frame_id
-
         if frame is not None:
-            _frame_h, _frame_w = frame.shape[:2]
+            state.frame_h, state.frame_w = frame.shape[:2]
+            if frame_id != _prev_frame_id:
+                _adb_frame_count += 1
+                _prev_frame_id = frame_id
+
+        # Recompute ADB FPS every second
+        _now = time.monotonic()
+        _elapsed = _now - _adb_fps_window_start
+        if _elapsed >= 1.0:
+            _adb_fps = _adb_frame_count / _elapsed
+            _adb_frame_count = 0
+            _adb_fps_window_start = _now
 
         # ── Events ───────────────────────────────────────────────────────
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+            if not dispatch_event(
+                event,
+                state=state,
+                device=device,
+                recognizer=recognizer,
+                frame=frame,
+            ):
                 running = False
 
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_q, pygame.K_ESCAPE):
-                    running = False
+        # ── Pull latest analysis from the worker thread ──────────────────
+        (
+            analysis_frame_id,
+            snap_board_grid,
+            snap_queue,
+            snap_confidences,
+            suggestion,
+        ) = analyzer.snapshot()
+        state.board.grid  = snap_board_grid
+        queue             = snap_queue
+        queue_confidences = snap_confidences
+        analysis_changed  = analysis_frame_id != last_analysis_frame_id
+        if analysis_changed:
+            last_analysis_frame_id = analysis_frame_id
 
-                elif event.key == pygame.K_TAB:
-                    calib_mode = MODE_PIECES if calib_mode == MODE_GRID else MODE_GRID
+        # ── Auto-play execution ──────────────────────────────────────────
+        maybe_execute_auto_swipe(
+            device=device,
+            state=state,
+            analyzer=analyzer,
+            suggestion=suggestion,
+            queue=queue,
+            queue_confidences=queue_confidences,
+            analysis_changed=analysis_changed,
+            analysis_frame_id=analysis_frame_id,
+        )
 
-                elif event.key == pygame.K_r:
-                    if calib_mode == MODE_GRID:
-                        cfg.grid = None
-                        board = Board()
-                    else:
-                        cfg.queue = None
-                    cfg.save()
-
-                elif event.key == pygame.K_d:
-                    if frame is not None and cfg.queue is not None and cfg.queue.is_valid():
-                        out = recognizer.save_debug(frame, cfg.queue)
-                        print(f"Saved queue debug images to: {out.resolve()}")
-                    else:
-                        print("Debug skipped: need a frame and a calibrated queue box.")
-
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                mx, my = event.pos
-                if PHONE_RECT.collidepoint(mx, my) and frame is not None:
-                    drag_start = (mx, my)
-                    drag_cur   = (mx, my)
-
-            elif event.type == pygame.MOUSEMOTION:
-                if drag_start is not None:
-                    drag_cur = event.pos
-
-            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                if drag_start is not None and drag_cur is not None and frame is not None:
-                    new_box = CalibrationBox.from_screen(
-                        drag_start[0], drag_start[1],
-                        drag_cur[0],   drag_cur[1],
-                        _scale, _blit_x, _blit_y,
-                        _frame_w, _frame_h,
-                    )
-                    if new_box.is_valid():
-                        if calib_mode == MODE_GRID:
-                            cfg.grid = new_box
-                        else:
-                            cfg.queue = new_box
-                        cfg.save()
-                drag_start = None
-                drag_cur   = None
-
-        # ── Board scan + queue recognition (only on new frames) ─────────
-        if frame_changed:
-            if cfg.grid is not None and cfg.grid.is_valid():
-                board.grid = scan_board(frame, cfg.grid)
-            if cfg.queue is not None and cfg.queue.is_valid():
-                results = recognizer.recognize_queue_with_confidence(frame, cfg.queue)
-                queue = [p for p, _ in results]
-                queue_confidences = [c for _, c in results]
-            last_processed_frame_id = frame_id
-
-        # ── Advisor (cached on board + queue) ────────────────────────────
-        suggestion = advisor.suggest(board.grid, queue) if queue else None
+        # While a servo placement is in flight, freeze the queue CNN's
+        # output (suggestion / queue / confidences) to the snapshot taken
+        # at dispatch time.  The board grid still updates live so the
+        # recon panel shows the ghost piece drifting into place.
+        if state.servo_active:
+            suggestion        = state.frozen_suggestion
+            queue             = state.frozen_queue
+            queue_confidences = state.frozen_confidences
 
         # ── Render ───────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
 
-        # Re-resize the phone frame only when the underlying frame changed
         if frame is not None and (
             phone_cache is None or phone_cache[0] != frame_id
         ):
@@ -186,7 +214,7 @@ def run() -> None:
             (phone_cache[1], phone_cache[2], phone_cache[3], phone_cache[4])
             if phone_cache is not None else None
         )
-        _scale, _blit_x, _blit_y = draw_phone_panel(
+        state.scale, state.blit_x, state.blit_y = draw_phone_panel(
             screen,
             frame=frame,
             rect=PHONE_RECT,
@@ -196,56 +224,86 @@ def run() -> None:
             cached_surface=cached,
         )
 
-        # Calibration overlays on top of the phone panel
         if frame is not None:
-            if cfg.grid is not None:
-                draw_grid_overlay(screen, cfg.grid, _scale, _blit_x, _blit_y)
-            if cfg.queue is not None:
+            if state.cfg.grid is not None:
+                draw_grid_overlay(screen, state.cfg.grid, state.scale, state.blit_x, state.blit_y)
+            if state.cfg.queue is not None:
                 draw_queue_overlay(
-                    screen, cfg.queue, _scale, _blit_x, _blit_y, small_font,
+                    screen, state.cfg.queue, state.scale, state.blit_x, state.blit_y, small_font,
                     chosen_slot=suggestion.slot if suggestion is not None else None,
                 )
-            if suggestion is not None and cfg.grid is not None and cfg.grid.is_valid():
+            if suggestion is not None and state.cfg.grid is not None and state.cfg.grid.is_valid():
                 draw_suggestion_on_phone(
-                    screen, cfg.grid, suggestion,
-                    _scale, _blit_x, _blit_y,
+                    screen, state.cfg.grid, suggestion,
+                    state.scale, state.blit_x, state.blit_y,
+                )
+            # Auto-play swipe arrow — visualise the last issued drag
+            if state.last_swipe is not None:
+                src_xy, dst_xy, t_start, dur_ms = state.last_swipe
+                age_ms = pygame.time.get_ticks() - t_start
+                draw_swipe_arrow_on_phone(
+                    screen,
+                    src_xy, dst_xy,
+                    age_ms=age_ms,
+                    scale=state.scale,
+                    blit_x=state.blit_x,
+                    blit_y=state.blit_y,
+                    duration_ms=dur_ms,
+                    small_font=small_font,
                 )
 
-        # Drag-in-progress preview
-        if drag_start is not None and drag_cur is not None:
-            draw_drag_preview(screen, drag_start, drag_cur)
+        if state.drag_start is not None and state.drag_cur is not None:
+            draw_drag_preview(screen, state.drag_start, state.drag_cur)
 
-        draw_recon_panel(
-            screen,
-            rect=RECON_RECT,
-            board=board,
-            queue=queue,
-            font=font,
-            small_font=small_font,
-            suggestion=suggestion,
-            queue_confidences=queue_confidences,
+        # Recon panel — rebuilt off-screen only when the underlying state changes.
+        new_recon_key = (
+            state.board.grid.tobytes(),
+            state.board.grid.shape,
+            tuple(p.piece_id if p is not None else -1 for p in queue),
+            tuple(round(c, 3) for c in queue_confidences),
+            (
+                (suggestion.slot, suggestion.row,
+                 suggestion.col, suggestion.piece.piece_id)
+                if suggestion is not None else None
+            ),
         )
+        if new_recon_key != recon_cache_key or recon_cache_surf is None:
+            recon_cache_surf = pygame.Surface(RECON_RECT.size, pygame.SRCALPHA)
+            draw_recon_panel(
+                recon_cache_surf,
+                rect=pygame.Rect(0, 0, RECON_RECT.width, RECON_RECT.height),
+                board=state.board,
+                queue=queue,
+                font=font,
+                small_font=small_font,
+                suggestion=suggestion,
+                queue_confidences=queue_confidences,
+            )
+            recon_cache_key = new_recon_key
+        screen.blit(recon_cache_surf, RECON_RECT.topleft)
 
-        # Build status hint showing active mode
-        mode_label = "GRID" if calib_mode == MODE_GRID else "PIECES"
-        hint = (
-            f"[Tab] mode: {mode_label}   "
-            "[drag] set box   "
-            "[R] clear   "
-            "[D] dump queue debug   "
-            "[Q/ESC] quit"
-        )
         draw_status_bar(
             screen,
             fps=clock.get_fps(),
             has_device=frame is not None,
             rect=STATUS_RECT,
             small_font=small_font,
-            hint=hint,
+            hint="",
+            adb_fps=_adb_fps,
+        )
+
+        state.control_rects = draw_controls_panel(
+            screen,
+            CONTROLS_RECT,
+            small_font,
+            calib_mode=state.calib_mode,
+            auto_enabled=state.auto_enabled,
+            device_supports_input=getattr(device, "supports_input", False),
         )
 
         pygame.display.flip()
-        clock.tick()  # uncapped — render as fast as possible
+        clock.tick(_TARGET_FPS)
 
+    analyzer.stop()
     stream.stop()
     pygame.quit()
