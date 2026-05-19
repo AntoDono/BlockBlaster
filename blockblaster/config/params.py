@@ -28,10 +28,10 @@ MAX_NO_PIECE_FRAMES  = 8     # consecutive frames without a detected piece
                              # before giving up.
 
 # ── SERVO: PD controller ────────────────────────────────────────────────
-GAIN                 = 0.7   # P term.  Rough estimate of piece-px per
+GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
                              # finger-px; smaller = larger steps for the
                              # same error, faster but more overshoot-prone.
-DERIV_GAIN           = 1.8   # D term.  Damps overshoot by anticipating
+DERIV_GAIN           = 2.5   # D term.  Damps overshoot by anticipating
                              # the piece's motion: when the error is
                              # shrinking (piece is already heading toward
                              # the target), the next step is reduced by
@@ -47,14 +47,14 @@ DERIV_GAIN           = 1.8   # D term.  Damps overshoot by anticipating
 # rather than jumping at full velocity into Block Blast's drag follower
 # (which lags fast moves and gives us stale visual feedback the next
 # frame).
-MAX_STEP_PX          = 30
+MAX_STEP_PX          = 48
 
 # Each iteration's step is interpolated into MOVE_SUBSTEPS touch-MOVE
 # events spaced MOVE_SUBSTEP_MS apart, so Android sees a smooth drag
 # instead of a single ~MAX_STEP_PX teleport.  Block Blast renders its
 # drag follower much more reliably on continuous motion.
-MOVE_SUBSTEPS        = 4
-MOVE_SUBSTEP_MS      = 8
+MOVE_SUBSTEPS        = 32
+MOVE_SUBSTEP_MS      = 2
 
 # ── SERVO: lock criteria ────────────────────────────────────────────────
 LOCK_TOL_PX          = 16    # |err| px tolerance on both axes.
@@ -74,13 +74,13 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
 AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
                              # before the assist GUI will dispatch a servo.
-AUTO_POST_PLACE_MS   = 200   # cooldown after the servo completes.
+AUTO_POST_PLACE_MS   = 1500   # cooldown after the servo completes.
 AUTO_SERVO_BUDGET_MS = 2800  # outer cap on a single servo run, in ms.
 
 # ── AUTOPLAY: headless loop (control/auto_player.py) ────────────────────
 CONF_THRESHOLD       = 0.65  # skip a frame if any slot confidence is
                              # below this.
-POST_PLACE_MS        = 1000   # wait after each swipe (animation + queue
+POST_PLACE_MS        = 300   # wait after each swipe (animation + queue
                              # refresh).
 CHANGE_TIMEOUT_MS    = 600   # give up waiting for a frame change after
                              # this.

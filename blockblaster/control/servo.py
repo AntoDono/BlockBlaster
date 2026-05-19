@@ -327,6 +327,8 @@ def place(
             iters      = 0
             prev_err_x: Optional[int] = None
             prev_err_y: Optional[int] = None
+            best_err_x = 10**9   # min |err_x| seen this run
+            best_err_y = 10**9   # min |err_y| seen this run
             _, last_fid = device.get_latest_with_id()
 
             while time.monotonic() < deadline:
@@ -396,12 +398,28 @@ def place(
                     state.servo_measured_px = (int(meas_cx_mean), int(meas_cy_mean))
 
                 all_cells_visible = paired == len(suggestion.piece.cells)
-                if (abs(err_x) <= LOCK_TOL_PX
-                        and abs(err_y) <= LOCK_TOL_PX
+                best_err_x = min(best_err_x, abs(err_x))
+                best_err_y = min(best_err_y, abs(err_y))
+
+                # Two release conditions:
+                #   1. Tight lock: both axes inside LOCK_TOL_PX *right now*.
+                #   2. Transit lock: each axis has been inside LOCK_TOL_PX at
+                #      some point this run AND is still within 2x tol now.
+                #      Catches a diagonal pass-through where the axes peak
+                #      on different frames.
+                tight_lock = (abs(err_x) <= LOCK_TOL_PX
+                              and abs(err_y) <= LOCK_TOL_PX)
+                transit_lock = (best_err_x <= LOCK_TOL_PX
+                                and best_err_y <= LOCK_TOL_PX
+                                and abs(err_x) <= 2 * LOCK_TOL_PX
+                                and abs(err_y) <= 2 * LOCK_TOL_PX)
+                if ((tight_lock or transit_lock)
                         and score >= LOCK_SCORE_MIN
                         and all_cells_visible):
+                    kind = "TIGHT" if tight_lock else "TRANSIT"
                     print(
-                        f"[servo {iters}] LOCK err=({err_x:+d},{err_y:+d}) "
+                        f"[servo {iters}] LOCK[{kind}] err=({err_x:+d},{err_y:+d}) "
+                        f"best=({best_err_x},{best_err_y}) "
                         f"score={score:.2f} cells={paired}/"
                         f"{len(suggestion.piece.cells)}"
                     )
@@ -410,13 +428,29 @@ def place(
                     return True
 
                 # PD step: P chases the error, D dampens by anticipating
-                # the piece's motion.  When err is shrinking (piece already
-                # heading the right way), `derr` has the opposite sign of
-                # `err` and the step is reduced -> no overshoot / spiral.
+                # the piece's motion.  When err is shrinking (piece is
+                # already heading toward the target), `derr` has the
+                # opposite sign of `err` and the step shrinks.
+                #
+                # Critical: clamp the D contribution so it can *reduce* the
+                # P term but never flip its sign — otherwise an aggressive
+                # D term will push the finger past the target when err is
+                # already near zero, which manifests as the spiral overshoot
+                # we saw in testing.
                 derr_x = 0 if prev_err_x is None else err_x - prev_err_x
                 derr_y = 0 if prev_err_y is None else err_y - prev_err_y
-                ctrl_x = (err_x + DERIV_GAIN * derr_x) / GAIN
-                ctrl_y = (err_y + DERIV_GAIN * derr_y) / GAIN
+                p_x = err_x / GAIN
+                p_y = err_y / GAIN
+                d_x = DERIV_GAIN * derr_x / GAIN
+                d_y = DERIV_GAIN * derr_y / GAIN
+                ctrl_x = p_x + d_x
+                ctrl_y = p_y + d_y
+                # If D dragged the control past zero (sign flipped vs P),
+                # null it out — let the piece coast for one frame instead.
+                if (p_x >= 0) != (ctrl_x >= 0):
+                    ctrl_x = 0.0
+                if (p_y >= 0) != (ctrl_y >= 0):
+                    ctrl_y = 0.0
                 dx = max(-MAX_STEP_PX, min(MAX_STEP_PX, int(ctrl_x)))
                 dy = max(-MAX_STEP_PX, min(MAX_STEP_PX, int(ctrl_y)))
                 next_finger = (finger[0] + dx, finger[1] + dy)
