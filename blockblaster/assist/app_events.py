@@ -12,12 +12,19 @@ from typing import Optional
 import numpy as np
 import pygame
 
+import datetime
+from pathlib import Path
+
 from blockblaster.assist.app_state import MODE_GRID, MODE_PIECES, AppState
 from blockblaster.assist.calibration import CalibrationBox
 from blockblaster.assist.layout import PHONE_RECT
 from blockblaster.assist.piece_recognizer import PieceRecognizer
 from blockblaster.control.device import Device
 from blockblaster.game.board import Board
+
+# Project-root-relative folder for ``S`` / Screenshot-chip captures.
+# Module-level Path is fine — Path is immutable and we only ever read it.
+_SCREENSHOTS_DIR = Path(__file__).resolve().parents[2] / "screenshots"
 
 
 def dispatch_event(
@@ -93,7 +100,38 @@ def _handle_keydown(
     elif event.key == pygame.K_h:
         _test_hold(state, device)
 
+    elif event.key == pygame.K_s:
+        _save_screenshot()
+
+    elif event.key == pygame.K_v:
+        state.servo_debug_view = not state.servo_debug_view
+        print(
+            f"[assist] servo debug view "
+            f"{'ON' if state.servo_debug_view else 'OFF'}"
+        )
+
     return True
+
+
+def _save_screenshot() -> None:
+    """Save the current pygame window to ``<repo>/screenshots/`` as PNG.
+
+    Filename includes a millisecond timestamp so rapid presses don't
+    overwrite each other.  Prints the saved path (or any error) so the
+    user gets confirmation in the terminal.
+    """
+    surface = pygame.display.get_surface()
+    if surface is None:
+        print("[screenshot] no pygame surface yet — ignored.")
+        return
+    try:
+        _SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        path = _SCREENSHOTS_DIR / f"assist_{ts}.png"
+        pygame.image.save(surface, str(path))
+        print(f"[screenshot] saved → {path}")
+    except Exception as exc:
+        print(f"[screenshot] failed: {exc}")
 
 
 def _test_swipe(state: AppState, device: Device) -> None:
@@ -205,6 +243,14 @@ def _dispatch_chip(
             print(f"Saved queue debug images to: {out.resolve()}")
         else:
             print("Debug skipped: need a frame and a calibrated queue box.")
+    elif action == "screenshot":
+        _save_screenshot()
+    elif action == "servo_dbg":
+        state.servo_debug_view = not state.servo_debug_view
+        print(
+            f"[assist] servo debug view "
+            f"{'ON' if state.servo_debug_view else 'OFF'}"
+        )
     return True
 
 

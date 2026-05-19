@@ -81,9 +81,9 @@ class AnalysisWorker:
 
         Board scanning keeps running — the published snapshot still gets a
         fresh ``board_grid`` every iteration so the recon panel can show
-        the ghost piece drifting into position during a visual-servo
-        placement.  Only ``queue`` / ``confidences`` / ``suggestion`` are
-        held at their last-known values.
+        the held piece's solid render drifting into position during a
+        visual-servo placement.  Only ``queue`` / ``confidences`` /
+        ``suggestion`` are held at their last-known values.
         """
         self._paused = True
 
@@ -140,8 +140,9 @@ class AnalysisWorker:
 
             if self._paused:
                 # Visual-servo in flight: keep refreshing the board (so the
-                # recon panel can show the ghost moving) but freeze the
-                # queue / confidences / suggestion at their last values.
+                # recon panel can show the held piece's solid render
+                # drifting into place) but freeze the queue / confidences /
+                # suggestion at their last values.
                 with self._lock:
                     self._snap_frame_id   = frame_id
                     self._snap_board_grid = board_grid

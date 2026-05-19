@@ -35,11 +35,13 @@ def draw_controls_panel(
     calib_mode: str,
     auto_enabled: bool,
     device_supports_input: bool,
+    servo_debug_view: bool = False,
 ) -> dict[str, pygame.Rect]:
     """Draw the row of clickable chip-buttons and return their screen rects.
 
     Returns a dict mapping action name → ``pygame.Rect``.  Actions:
-        ``"auto"``, ``"mode"``, ``"clear"``, ``"debug"``, ``"quit"``
+        ``"auto"``, ``"mode"``, ``"clear"``, ``"debug"``,
+        ``"screenshot"``, ``"quit"``
     """
     pygame.draw.rect(screen, _BG, rect)
     pygame.draw.line(screen, _PANEL_LINE, rect.topleft, rect.topright)
@@ -57,6 +59,11 @@ def draw_controls_panel(
     chips.append(("mode",  f"Mode: {'GRID' if calib_mode == MODE_GRID else 'PIECES'}", _WHITE, True))
     chips.append(("clear", "Clear box",  _WHITE, True))
     chips.append(("debug", "Dump debug", _WHITE, True))
+    if servo_debug_view:
+        chips.append(("servo_dbg", "Servo dbg [ON]", _GREEN, True))
+    else:
+        chips.append(("servo_dbg", "Servo dbg [V]", _WHITE, True))
+    chips.append(("screenshot", "Screenshot [S]", _WHITE, True))
     chips.append(("quit", "Quit  [Q]", _RED, True))
 
     cy = rect.y + rect.height // 2

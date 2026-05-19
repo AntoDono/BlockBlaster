@@ -67,30 +67,22 @@ in [assist-gui.md](assist-gui.md).
 
 Auto-play does **not** rely on a pre-baked finger calibration. Each move
 runs a closed-loop visual servo: press the finger on the queue slot,
-coarsely jump toward the planned cells, then iterate
-`detect-piece → check-lock → step-finger` until the held piece's cells
-match the suggestion (or we run out of budget). The detection signal is
-the same `scan_board` output the recon panel renders, so "GUI shows the
-piece on the target" and "servo agrees" are equivalent by construction.
+then loop {template-match the held piece against the board diff,
+P-step the finger toward the matched centroid} until both the
+centroid error and the match score are inside their tolerances.
+Release when locked; lift in place if the loop budget runs out.
 
-Two pieces make it robust against Block Blast's non-1:1 finger→piece
-transform:
-
-* A **two-mode controller** — fixed-stride coarse march for big errors,
-  plant-inverted fine controller for the final approach.
-* An **online plant-gain estimator** that learns the ratio
-  `piece-px / finger-px` from each placement and persists it across
-  calls, so the next placement's open-loop coarse jump auto-sizes
-  itself instead of using a baked constant.
-
-Full algorithm walk-through, all tunables, the persistence model, and
-how to retune for a new device live in **[visual-servo.md](visual-servo.md)**.
+The detector is one `cv2.matchTemplate` pass per frame against the
+diff of the current `_board_filled_mask` and a pre-grab snapshot of
+that same mask. No tracker state, no learning — every frame is a
+fresh global search. Every tunable lives at the top of
+[`blockblaster/control/servo.py`](../blockblaster/control/servo.py).
 
 Code layout:
 
-- [`blockblaster/control/visual_servo/`](../blockblaster/control/visual_servo/) — split into `placer`, `controller`, `plant_gain`, `detection`, `tunables` (see [visual-servo.md](visual-servo.md#module-layout)).
+- [`blockblaster/control/servo.py`](../blockblaster/control/servo.py) — the entire servo, one file: constants, `_board_filled_mask`, `_make_template`, `_locate_piece`, and the public `place(...) -> bool`.
 - [`blockblaster/control/scrcpy_control.py`](../blockblaster/control/scrcpy_control.py) — host-side scrcpy server lifecycle + INJECT_TOUCH_EVENT packet plumbing (see next section).
-- [`scan_board`](../blockblaster/assist/scanner.py) — board state from one frame; same function both the recon panel and the servo's detection layer call.
+- [`scan_board`](../blockblaster/assist/scanner.py) — board state from one frame, used by the recon panel.
 
 ## scrcpy server v1.20 + adbutils tunnel
 
@@ -231,7 +223,7 @@ blockblaster/control/
   coords.py          # slot_center_px / cell_center_px / piece_anchor_px
   scrcpy_control.py  # ScrcpyControl: runs scrcpy-server v1.20 on-device,
                      # tunnels INJECT_TOUCH_EVENT via adbutils LOCAL_ABSTRACT
-  visual_servo.py    # place_with_servo: closed-loop ghost-locked placement
+  servo.py           # place(): closed-loop template-match placement
   touch_capture.py   # TouchCapture: getevent stream (kept for diagnostics)
   auto_player.py     # main loop: capture → scan → advise → servo → wait
 ```

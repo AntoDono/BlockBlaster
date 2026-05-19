@@ -15,14 +15,14 @@ import pygame
 from blockblaster.assist.advisor import Suggestion
 from blockblaster.assist.analyzer import AnalysisWorker
 from blockblaster.assist.app_state import AppState
+from blockblaster.config.params import (
+    AUTO_CONF_THRESHOLD,
+    AUTO_POST_PLACE_MS,
+    AUTO_SERVO_BUDGET_MS,
+)
 from blockblaster.control.coords import piece_anchor_px, slot_center_px
 from blockblaster.control.device import Device
-from blockblaster.control.visual_servo import _GRAB_Y_NUDGE_PX, place_with_servo
-
-AUTO_CONF_THRESHOLD = 0.3   # min CNN confidence across all 3 queue slots
-AUTO_POST_PLACE_MS  = 500    # cooldown after the servo completes
-# Must be ≥ visual_servo._MAX_LOOP_S * 1000 + ADB / scrcpy overhead.
-AUTO_SERVO_BUDGET_MS = 3000
+from blockblaster.control.servo import GRAB_Y_NUDGE_PX, place
 
 
 def _run_servo_safely(
@@ -33,29 +33,28 @@ def _run_servo_safely(
     frame_w: int,
     frame_h: int,
 ) -> None:
-    """Run ``place_with_servo`` on a worker thread; disable auto-play on hard failure.
+    """Run :func:`servo.place` on a worker thread; disable auto-play on hard failure.
 
     Always unfreezes the GUI and resumes the analyzer in a ``finally`` block
     so a crash mid-servo can never leave the assist window pinned to a stale
     snapshot.
     """
     try:
-        result = place_with_servo(
+        ok = place(
             device=device,
             cfg=state.cfg,
             suggestion=suggestion,
             frame_w=frame_w,
             frame_h=frame_h,
+            state=state,
         )
-        print(
-            f"[auto] servo: {'ok' if result.success else 'FAIL'} "
-            f"({result.reason}, {result.iters} iters)"
-        )
+        print(f"[auto] servo: {'ok' if ok else 'FAIL'}")
     except Exception as exc:
         print(f"[auto] servo crashed, disabling auto-play: {exc}")
         state.auto_enabled = False
     finally:
         state.servo_active       = False
+        state.servo_detection    = None
         state.frozen_suggestion  = None
         state.frozen_queue       = []
         state.frozen_confidences = []
@@ -119,9 +118,9 @@ def maybe_execute_auto_swipe(
 
     try:
         slot_cx, slot_cy = slot_center_px(state.cfg.queue, suggestion.slot)
-        # Mirror the visual_servo grab-point nudge so the on-screen arrow
+        # Mirror the servo grab-point nudge so the on-screen arrow
         # shows where the finger actually touches down.
-        src = (slot_cx, slot_cy - _GRAB_Y_NUDGE_PX)
+        src = (slot_cx, slot_cy - GRAB_Y_NUDGE_PX)
         dst = piece_anchor_px(
             state.cfg.grid, suggestion.piece, suggestion.row, suggestion.col,
         )
@@ -149,7 +148,8 @@ def maybe_execute_auto_swipe(
         # Freeze the queue CNN + advisor output to what we saw at dispatch
         # time, and pause the analyzer's queue/advisor pass so mid-swipe
         # CNN reads don't reshape the on-screen suggestion.  Board scanning
-        # keeps running — the recon panel needs it to show the ghost piece.
+        # keeps running — the recon panel needs it to show the held piece's
+        # solid render drifting into place.
         state.frozen_suggestion  = suggestion
         state.frozen_queue       = list(queue)
         state.frozen_confidences = list(queue_confidences)

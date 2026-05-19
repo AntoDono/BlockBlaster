@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
+
 from blockblaster.assist.advisor import Suggestion
 from blockblaster.assist.calibration import CalibrationConfig
 from blockblaster.game.board import Board
@@ -51,11 +53,45 @@ class AppState:
     # While a servo placement is in flight we pause the queue CNN + advisor
     # and pin the suggestion / queue / confidences to whatever was on screen
     # at dispatch time.  Board scans keep flowing so the recon panel can
-    # show the ghost piece drifting into place.
+    # show the held piece's solid render drifting into place.
     servo_active: bool = False
     frozen_suggestion: Optional[Suggestion] = None
     frozen_queue: list = field(default_factory=list)
     frozen_confidences: list = field(default_factory=list)
+
+    # Latest held-piece detection from the visual servo, for the recon
+    # panel overlay.  Tuple is (top_left_col, top_left_row, piece_rows,
+    # piece_cols, score) in board-cell coordinates.  None when no servo
+    # is running or the latest frame failed to detect.
+    servo_detection: Optional[tuple[int, int, int, int, float]] = None
+
+    # Latest motion mask the matcher saw, cropped to the calibrated
+    # board area.  np.uint8 array of shape (fh, fw) with values in
+    # {0, 255}.  Published by the servo every iteration; used by the
+    # recon panel's debug view (toggled with the "servo dbg" chip / V)
+    # so the user can eyeball what the matcher sees in real time.
+    servo_debug_mask: Optional[np.ndarray] = None
+
+    # When True, the recon panel replaces the reconstructed board with
+    # the live motion mask scaled to fit.  Detection overlay still
+    # renders on top.  Also enables the phone-panel overlay that shows
+    # current-piece and target-piece dots + an error vector between them.
+    servo_debug_view: bool = False
+
+    # Phone-frame pixel coordinates published by the servo each iter, used
+    # by the phone-panel debug overlay.  None means "not currently
+    # available".
+    #   servo_target_px   — where we're trying to put the piece (bbox centre).
+    #   servo_measured_px — where the matcher says the piece currently is.
+    servo_target_px:   Optional[tuple[int, int]] = None
+    servo_measured_px: Optional[tuple[int, int]] = None
+
+    # Per-cell positions in full-frame pixels.  Same ordering when both
+    # lists are the same length (matches ``suggestion.piece.cells``);
+    # ``servo_measured_cells`` may be shorter when some cells are
+    # occluded.  Used by the debug overlay to draw one dot per cell.
+    servo_target_cells:   list[tuple[int, int]] = field(default_factory=list)
+    servo_measured_cells: list[tuple[int, int]] = field(default_factory=list)
 
     # Clickable chip rects returned by draw_controls_panel (keyed by action name)
     control_rects: dict = field(default_factory=dict)

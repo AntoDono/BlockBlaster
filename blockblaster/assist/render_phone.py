@@ -315,6 +315,95 @@ def draw_swipe_arrow_on_phone(
         screen.blit(text, (int(dx) + 12, int(dy) + 4))
 
 
+def draw_servo_error_on_phone(
+    screen: pygame.Surface,
+    *,
+    target_xy: Optional[tuple[int, int]],
+    measured_xy: Optional[tuple[int, int]],
+    target_cells: Optional[list[tuple[int, int]]] = None,
+    measured_cells: Optional[list[tuple[int, int]]] = None,
+    scale: float,
+    blit_x: int,
+    blit_y: int,
+    small_font: Optional[pygame.font.Font] = None,
+) -> None:
+    """Draw the servo error visualization on the phone panel.
+
+    Per cell: a green crosshair at the target cell centre, a magenta
+    dot at where the matcher's per-cell COM lands, and a yellow line
+    between them.  Plus a thicker aggregate error line between the
+    means of both sets so the bulk-motion direction is obvious at a
+    glance.  Coordinates are in frame pixels.
+    """
+    target_col   = (60,  220, 130)   # bright green = where we want the piece
+    measured_col = (255, 60,  150)   # hot magenta = where the piece is
+    line_col     = (255, 230, 60)    # yellow = error vector
+
+    def _to_screen(p: tuple[int, int]) -> tuple[int, int]:
+        return (int(blit_x + p[0] * scale), int(blit_y + p[1] * scale))
+
+    # ── Per-cell error lines (thin) ────────────────────────────────
+    if target_cells and measured_cells and len(target_cells) == len(measured_cells):
+        for t_xy, m_xy in zip(target_cells, measured_cells):
+            t = _to_screen(t_xy)
+            m = _to_screen(m_xy)
+            pygame.draw.line(screen, line_col, m, t, 2)
+
+    # ── Aggregate error line (thick, glow) ─────────────────────────
+    if target_xy is not None and measured_xy is not None:
+        t = _to_screen(target_xy)
+        m = _to_screen(measured_xy)
+        pygame.draw.line(screen, (line_col[0] // 2, line_col[1] // 2, 0), m, t, 7)
+        pygame.draw.line(screen, line_col, m, t, 3)
+
+    # ── Target dots (one per cell) ─────────────────────────────────
+    if target_cells:
+        for t_xy in target_cells:
+            t = _to_screen(t_xy)
+            pygame.draw.circle(screen, (0, 0, 0), t, 7)
+            pygame.draw.circle(screen, target_col, t, 5)
+
+    # Aggregate target — bigger crosshair so it stands out.
+    if target_xy is not None:
+        t = _to_screen(target_xy)
+        pygame.draw.circle(screen, (0, 0, 0), t, 11)
+        pygame.draw.circle(screen, target_col, t, 9)
+        pygame.draw.line(screen, target_col, (t[0] - 14, t[1]), (t[0] + 14, t[1]), 2)
+        pygame.draw.line(screen, target_col, (t[0], t[1] - 14), (t[0], t[1] + 14), 2)
+
+    # ── Measured dots (one per cell) ───────────────────────────────
+    if measured_cells:
+        for m_xy in measured_cells:
+            m = _to_screen(m_xy)
+            pygame.draw.circle(screen, (0, 0, 0), m, 7)
+            pygame.draw.circle(screen, measured_col, m, 5)
+
+    if measured_xy is not None:
+        m = _to_screen(measured_xy)
+        pygame.draw.circle(screen, (0, 0, 0), m, 11)
+        pygame.draw.circle(screen, measured_col, m, 8)
+        pygame.draw.circle(screen, (255, 255, 255), m, 3)
+
+    if small_font is not None and target_xy is not None and measured_xy is not None:
+        err_x = target_xy[0] - measured_xy[0]
+        err_y = target_xy[1] - measured_xy[1]
+        cells_label = ""
+        if measured_cells is not None and target_cells is not None:
+            cells_label = f"  cells={len(measured_cells)}/{len(target_cells)}"
+        label = f"err=({err_x:+d},{err_y:+d}){cells_label}"
+        text  = small_font.render(label, True, line_col)
+        bg    = pygame.Surface(
+            (text.get_width() + 8, text.get_height() + 4), pygame.SRCALPHA,
+        )
+        bg.fill((0, 0, 0, 180))
+        mid_x = (target_xy[0] + measured_xy[0]) / 2
+        mid_y = (target_xy[1] + measured_xy[1]) / 2
+        sx = int(blit_x + mid_x * scale)
+        sy = int(blit_y + mid_y * scale)
+        screen.blit(bg,   (sx + 6, sy + 6))
+        screen.blit(text, (sx + 10, sy + 8))
+
+
 def draw_drag_preview(
     screen: pygame.Surface,
     start: tuple[int, int],

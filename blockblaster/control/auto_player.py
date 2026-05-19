@@ -20,13 +20,15 @@ from typing import TYPE_CHECKING, Optional
 import cv2
 import numpy as np
 
+from blockblaster.config.params import (
+    CHANGE_TIMEOUT_MS,
+    CONF_THRESHOLD,
+    DISPLAY_SCALE,
+    POST_PLACE_MS,
+)
+
 if TYPE_CHECKING:
     from blockblaster.control.device import Device
-
-CONF_THRESHOLD    = 0.65   # skip a frame if any slot confidence is below this
-POST_PLACE_MS     = 600    # wait after each swipe (animation + queue refresh)
-CHANGE_TIMEOUT_MS = 2000   # give up waiting for a frame change after this
-DISPLAY_SCALE     = 0.45   # pygame preview window scale factor
 
 
 def run(
@@ -49,7 +51,7 @@ def run(
     from blockblaster.assist.scanner import scan_board
     from blockblaster.control.coords import piece_anchor_px, slot_center_px
     from blockblaster.control.device import make_device
-    from blockblaster.control.visual_servo import _GRAB_Y_NUDGE_PX, place_with_servo
+    from blockblaster.control.servo import GRAB_Y_NUDGE_PX, place
     from blockblaster.game.board import Board
 
     cfg = CalibrationConfig.load(platform="android")
@@ -143,7 +145,7 @@ def run(
 
             # Annotate planned drag for the preview window (frame px).
             slot_cx, slot_cy = slot_center_px(cfg.queue, suggestion.slot)
-            src = (slot_cx, slot_cy - _GRAB_Y_NUDGE_PX)
+            src = (slot_cx, slot_cy - GRAB_Y_NUDGE_PX)
             dst = piece_anchor_px(
                 cfg.grid, suggestion.piece, suggestion.row, suggestion.col,
             )
@@ -161,17 +163,14 @@ def run(
                 clock.tick(30)
 
             fh, fw = frame.shape[:2]
-            result = place_with_servo(
+            ok = place(
                 device=device,
                 cfg=cfg,
                 suggestion=suggestion,
                 frame_w=fw,
                 frame_h=fh,
             )
-            print(
-                f"[auto_player] servo: {'ok' if result.success else 'FAIL'} "
-                f"({result.reason}, {result.iters} iters)"
-            )
+            print(f"[auto_player] servo: {'ok' if ok else 'FAIL'}")
 
             _wait_for_change(device, last_frame_id, CHANGE_TIMEOUT_MS)
             time.sleep(POST_PLACE_MS / 1000)

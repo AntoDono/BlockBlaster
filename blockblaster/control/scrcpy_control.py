@@ -46,7 +46,7 @@ Wire protocol (v1.20)
 
 A continuous DOWN → MOVE… → UP gesture is just a sequence of those
 packets with arbitrary host-side timing between them — which is what
-the visual servo needs to react to ghost-preview feedback mid-drag.
+the visual servo needs to react to per-frame visual feedback mid-drag.
 """
 
 from __future__ import annotations
@@ -406,9 +406,25 @@ class ScrcpyControl:
 
         Coordinates are clamped to the screen so a tiny overshoot from
         the visual servo doesn't get silently rejected.
+
+        ``ACTION_UP`` MUST be sent with pressure=0 and buttons=0, the
+        way scrcpy's own client does it.  Android's MotionEvent
+        semantics use the pressure-to-zero transition to detect a
+        finger lift; sending UP with full pressure looks like a
+        continued press at the new coordinates, and apps that gate
+        gesture commit on the lift (Block Blast's piece-drop being
+        the example that bit us) silently ignore the event.  Symptom:
+        ``session.up()`` returns cleanly, log says "released", and
+        the held piece just keeps being dragged on the device.
         """
         cx = max(0, min(self._sw - 1, int(x)))
         cy = max(0, min(self._sh - 1, int(y)))
+        if action == ACTION_UP:
+            pressure = 0
+            buttons  = 0
+        else:
+            pressure = _PRESSURE_FULL_FP16
+            buttons  = _PRIMARY_BUTTON
         packet = struct.pack(
             _PACKFMT,
             _TYPE_INJECT_TOUCH_EVENT,
@@ -416,8 +432,8 @@ class ScrcpyControl:
             _POINTER_ID_FINGER,
             cx, cy,
             self._sw, self._sh,
-            _PRESSURE_FULL_FP16,
-            _PRIMARY_BUTTON,
+            pressure,
+            buttons,
         )
         with self._lock:
             if self._ctrl is None:

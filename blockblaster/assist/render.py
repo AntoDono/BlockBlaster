@@ -33,6 +33,7 @@ from blockblaster.assist.render_phone import (  # noqa: F401
     draw_grid_overlay,
     draw_phone_panel,
     draw_queue_overlay,
+    draw_servo_error_on_phone,
     draw_status_bar,
     draw_suggestion_on_phone,
     draw_swipe_arrow_on_phone,

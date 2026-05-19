@@ -50,11 +50,10 @@ flowchart LR
     subgraph ACT["**3. Act on the device**"]
         direction TB
         A1["Advisor → suggestion"]
-        A2["Visual servo drag<br/>(two-mode P controller)"]
-        A3["Online plant-gain<br/>learner (EMA)"]
-        A4["Per-device JSON cache"]
-        A5["Blind-commit guard"]
-        A1 --> A2 --> A3 --> A4 --> A5
+        A2["Visual servo drag<br/>(P controller)"]
+        A3["Per-frame template match<br/>(piece silhouette)"]
+        A4["Release when locked"]
+        A1 --> A2 --> A3 --> A4
     end
 
     TRAIN ==> PERCEIVE ==> ACT
@@ -64,7 +63,7 @@ flowchart LR
     class TRAIN,PERCEIVE,ACT stage
 ```
 
-Each stage is a real, runnable subsystem — not a notebook stub. The agent that decides moves is the same agent that plays in simulation; the perception pipeline that draws overlays is the same one that feeds the action loop; the servo that drags pieces learns its own physics constants and persists them per phone.
+Each stage is a real, runnable subsystem — not a notebook stub. The agent that decides moves is the same agent that plays in simulation; the perception pipeline that draws overlays is the same one that feeds the action loop; the servo that drags pieces closes its own loop on every frame off a per-frame template match.
 
 ### Why the pieces are interesting
 
@@ -72,7 +71,7 @@ Each stage is a real, runnable subsystem — not a notebook stub. The agent that
 
 **The perception stack** is built on a tiny piece-classifier CNN trained entirely on synthetic data — every queue tile, every render variant, generated on the fly. The assist GUI overlays the agent's planned move on the mirrored screen in real time and includes a **reconstructed-scene panel** that lets you see what the scanner sees (placed cells, ghost preview, queue confidences). See [`docs/assist-gui.md`](docs/assist-gui.md).
 
-**The visual servo** is the bit most projects skip. It closes the loop on the device: watches the held piece as it's being dragged, runs a two-mode P controller (fixed-stride coarse, plant-inverted fine), **learns the per-device plant gain online** via EMA with column-snap rejection, persists it to disk per ADB serial, and has a blind-commit fallback for top-row placements where the held piece is rendered outside the scanner's view. The Y-axis bias accounts for per-piece geometry — a vertical 4×1 bar aims the finger to a different row than a horizontal 1×4 even when both target the same board cells. See [`docs/visual-servo.md`](docs/visual-servo.md).
+**The visual servo** is the bit most projects skip. It closes the loop on the device: every frame, threshold the board crop to a binary mask, subtract the pre-grab snapshot, template-match the held piece's silhouette against the diff, and P-step the finger toward the matched centroid until the error and the match score are both inside their tolerances — then lift.
 
 ## Quick start
 
@@ -85,7 +84,7 @@ uv run play.py --platform ios --mode assist      # live overlay on a mirrored iP
 uv run play.py --platform android                # full auto-play on Android
 ```
 
-The Android path is the headline feature: connect a phone over ADB, launch Block Blast, run the command, and the agent will calibrate the board, pick moves, drive the finger, and learn its own servo constants over the first few placements. Per-device gains are cached at `learned_device_params/<serial>.json` and reloaded automatically on the next run.
+The Android path is the headline feature: connect a phone over ADB, launch Block Blast, run the command, and the agent will calibrate the board, pick moves, and drive the finger via the closed-loop servo.
 
 ## Repository tour
 
@@ -96,10 +95,8 @@ The Android path is the headline feature: connect a phone over ADB, launch Block
 | `blockblaster/agent/` | Decision policy: afterstate enumeration, value lookup, beam-search lookahead. |
 | `blockblaster/piece_cnn/` | Synthetic data generator and CNN that classifies queue tiles from pixels. |
 | `blockblaster/assist/` | Pygame assist GUI, screen analyzer, board/queue scanner, recon panel, advisor wiring. |
-| `blockblaster/control/` | Device abstractions (ADB, scrcpy), visual servo package, calibration. |
-| `blockblaster/control/visual_servo/` | `placer.py` orchestration · `controller.py` two-mode P · `plant_gain.py` online learner + per-device cache · `detection.py` piece-on-board recognition · `tunables.py` every constant. |
+| `blockblaster/control/` | Device abstractions (ADB, scrcpy), `servo.py` closed-loop placer, calibration. |
 | `docs/` | Long-form documentation per subsystem (see below). |
-| `learned_device_params/` | Auto-generated JSON cache of per-device servo plant gains. |
 
 ## Documentation
 
@@ -114,7 +111,6 @@ The README is just the index. Each doc cross-references the others, so any one o
 | [`docs/training.md`](docs/training.md) | `simulate` → `train` → repeat loop, generated files, how to watch the trained agent play. |
 | [`docs/assist-gui.md`](docs/assist-gui.md) | Side-by-side viewer, calibration flow, key bindings, the synthetic-data piece classifier. |
 | [`docs/android-autoplay.md`](docs/android-autoplay.md) | Emulator / physical-phone setup, scrcpy v1.20 + adbutils touch tunnel, end-to-end auto-play. |
-| [`docs/visual-servo.md`](docs/visual-servo.md) | Deep dive on the placer: two-mode controller, online plant-gain learning, blind-commit fallback, per-piece Y bias, all tunables, retuning recipe. |
 
 ## Status & limitations
 
@@ -122,7 +118,7 @@ Honest about what works and what doesn't:
 
 - **Simulation pipeline:** stable. Train, evaluate, watch in-sim.
 - **iOS assist (read-only overlay):** works on a mirrored iPhone — pure visualisation, no input injection (Apple doesn't allow it without a paired Mac/Xcode signature).
-- **Android auto-play:** working but device-specific. The servo learns plant gain online; first few placements on a new device may need a couple of retries before the cache converges. Top-row placements of vertical pieces previously failed; now handled by per-piece geometry-aware finger targeting.
+- **Android auto-play:** working but device-specific. The servo's HSV threshold and match-score tolerances may need a small retune for very different board palettes; see the tunables block at the top of `blockblaster/control/servo.py`.
 - **Calibration:** semi-manual on first use — drop the grid + queue boxes on the mirrored frame once, persisted to JSON for subsequent runs.
 
 If you fork this and play with a different game, the perception + control split is reusable: the servo doesn't know anything about Block Blast specifically, only about "drag this finger so that thing on screen lines up with that target."

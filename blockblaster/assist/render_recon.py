@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
 import pygame
 
 from blockblaster.assist.advisor import Suggestion
@@ -36,6 +37,9 @@ def draw_recon_panel(
     small_font: pygame.font.Font,
     suggestion: Optional[Suggestion] = None,
     queue_confidences: Optional[list[float]] = None,
+    detection: Optional[tuple[int, int, int, int, float]] = None,
+    debug_mask: Optional[np.ndarray] = None,
+    debug_view: bool = False,
 ) -> None:
     """Draw the right reconstructed game-state panel."""
     pygame.draw.rect(screen, PANEL_BG,     rect, border_radius=10)
@@ -50,10 +54,19 @@ def draw_recon_panel(
     board_x         = rect.x + (rect.width - total_inner_w) // 2
     board_y         = rect.y + 36 + (rect.height - 36 - board_px) // 2
 
-    draw_board(screen, board, board_x, board_y)
+    if debug_view and debug_mask is not None:
+        _draw_motion_mask(screen, debug_mask, board_x, board_y, board_px, small_font)
+    else:
+        draw_board(screen, board, board_x, board_y)
 
     if suggestion is not None:
         _draw_ghost_piece_on_board(screen, suggestion, board_x, board_y)
+
+    if detection is not None:
+        piece_for_overlay = suggestion.piece if suggestion is not None else None
+        _draw_detection_overlay(
+            screen, detection, board_x, board_y, small_font, piece_for_overlay,
+        )
 
     qx          = board_x + board_px + 12
     chosen_slot = suggestion.slot if suggestion is not None else None
@@ -146,6 +159,109 @@ def _draw_mini_queue(
 
         piece_color = SUGGEST_FILL if i == chosen_slot else PIECE_COLORS[i % len(PIECE_COLORS)]
         draw_piece_preview(surface, piece, x0 + 10, sy + 18, color=piece_color)
+
+
+def _draw_motion_mask(
+    surface: pygame.Surface,
+    mask: np.ndarray,
+    board_x: int,
+    board_y: int,
+    board_px: int,
+    small_font: pygame.font.Font,
+) -> None:
+    """Render the servo's motion mask in place of the recon board.
+
+    Moved pixels render bright cyan on near-black so the matcher's
+    view is unmistakable.  An 8x8 grid is drawn on top so the cell
+    structure stays legible.
+    """
+    if mask.ndim != 2 or mask.size == 0:
+        return
+
+    h, w = mask.shape
+    # Build an RGB image: moved pixels cyan, static near-black.
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    moved = mask > 0
+    rgb[..., 0][moved] = 0
+    rgb[..., 1][moved] = 220
+    rgb[..., 2][moved] = 255
+    rgb[~moved] = (16, 18, 28)
+
+    # pygame surfarray expects (w, h, 3) so swap axes.
+    surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
+    surf = pygame.transform.smoothscale(surf, (board_px, board_px))
+    surface.blit(surf, (board_x, board_y))
+
+    cell = board_px / 8
+    grid_col = (60, 70, 90)
+    for i in range(9):
+        x = board_x + int(i * cell)
+        y = board_y + int(i * cell)
+        pygame.draw.line(surface, grid_col, (x, board_y), (x, board_y + board_px), 1)
+        pygame.draw.line(surface, grid_col, (board_x, y), (board_x + board_px, y), 1)
+
+    badge = small_font.render(
+        f"motion mask {w}x{h}", True, (200, 230, 240),
+    )
+    badge_bg = pygame.Surface(
+        (badge.get_width() + 8, badge.get_height() + 4), pygame.SRCALPHA,
+    )
+    badge_bg.fill((0, 0, 0, 160))
+    surface.blit(badge_bg, (board_x + 4, board_y + board_px - badge.get_height() - 8))
+    surface.blit(badge, (board_x + 8, board_y + board_px - badge.get_height() - 6))
+
+
+_DETECT_FILL    = (255, 0, 200)   # hot magenta — contrasts hard against the
+                                  # blue suggestion ghost and the board's
+                                  # navy background, so the live detection
+                                  # never blends into either.
+_DETECT_FILL_A  = 120
+_DETECT_BORDER  = (255, 80, 230)
+
+
+def _draw_detection_overlay(
+    surface: pygame.Surface,
+    detection: tuple[int, int, int, int, float],
+    board_x: int,
+    board_y: int,
+    small_font: pygame.font.Font,
+    piece: Optional[Piece],
+) -> None:
+    """Paint the live matcher detection on the recon board.
+
+    Renders the piece's actual cell pattern when available, falling back
+    to the matched bounding rectangle otherwise.  Adds a ``score=0.NN``
+    badge in the cyan piece colour.
+    """
+    tl_col, tl_row, p_rows, p_cols, score = detection
+
+    if piece is not None:
+        cells = list(piece.cells)
+    else:
+        cells = [(dr, dc) for dr in range(p_rows) for dc in range(p_cols)]
+
+    for dr, dc in cells:
+        r, c = tl_row + dr, tl_col + dc
+        if not (0 <= r < 8 and 0 <= c < 8):
+            continue
+        rect = pygame.Rect(
+            board_x + c * CELL_SIZE + 2,
+            board_y + r * CELL_SIZE + 2,
+            CELL_SIZE - 4, CELL_SIZE - 4,
+        )
+        ov = pygame.Surface(rect.size, pygame.SRCALPHA)
+        ov.fill((*_DETECT_FILL, _DETECT_FILL_A))
+        surface.blit(ov, rect.topleft)
+        pygame.draw.rect(surface, _DETECT_BORDER, rect, width=4, border_radius=5)
+
+    badge_text = f"DET score={score:.2f}"
+    badge = small_font.render(badge_text, True, _DETECT_BORDER)
+    badge_bg = pygame.Surface(
+        (badge.get_width() + 8, badge.get_height() + 4), pygame.SRCALPHA,
+    )
+    badge_bg.fill((0, 0, 0, 160))
+    surface.blit(badge_bg, (board_x + 4, board_y + 4))
+    surface.blit(badge, (board_x + 8, board_y + 6))
 
 
 def _draw_ghost_piece_on_board(

@@ -38,6 +38,7 @@ from blockblaster.assist.render import (
     draw_phone_panel,
     draw_queue_overlay,
     draw_recon_panel,
+    draw_servo_error_on_phone,
     draw_status_bar,
     draw_suggestion_on_phone,
     draw_swipe_arrow_on_phone,
@@ -75,6 +76,8 @@ def run(
         Drag on left panel  – set bounding box for the active mode
         R                   – clear the active mode's box
         D                   – dump per-slot debug images
+        S                   – save a screenshot of the window to
+                              ``screenshots/`` in the project root
         Q / ESC             – quit
 
     The chip buttons at the bottom of the window mirror every keyboard
@@ -191,7 +194,8 @@ def run(
         # While a servo placement is in flight, freeze the queue CNN's
         # output (suggestion / queue / confidences) to the snapshot taken
         # at dispatch time.  The board grid still updates live so the
-        # recon panel shows the ghost piece drifting into place.
+        # recon panel shows the held piece's solid render drifting into
+        # place.
         if state.servo_active:
             suggestion        = state.frozen_suggestion
             queue             = state.frozen_queue
@@ -237,6 +241,18 @@ def run(
                     screen, state.cfg.grid, suggestion,
                     state.scale, state.blit_x, state.blit_y,
                 )
+            if state.servo_debug_view:
+                draw_servo_error_on_phone(
+                    screen,
+                    target_xy=state.servo_target_px,
+                    measured_xy=state.servo_measured_px,
+                    target_cells=state.servo_target_cells,
+                    measured_cells=state.servo_measured_cells,
+                    scale=state.scale,
+                    blit_x=state.blit_x,
+                    blit_y=state.blit_y,
+                    small_font=small_font,
+                )
             # Auto-play swipe arrow — visualise the last issued drag
             if state.last_swipe is not None:
                 src_xy, dst_xy, t_start, dur_ms = state.last_swipe
@@ -266,6 +282,20 @@ def run(
                  suggestion.col, suggestion.piece.piece_id)
                 if suggestion is not None else None
             ),
+            (
+                # Round the score so the cache key doesn't churn on
+                # micro-fluctuations between frames.
+                (state.servo_detection[0], state.servo_detection[1],
+                 state.servo_detection[2], state.servo_detection[3],
+                 round(state.servo_detection[4], 2))
+                if state.servo_detection is not None else None
+            ),
+            state.servo_debug_view,
+            # When the debug view is on, invalidate the cache per-frame
+            # while a mask is available so the live motion view animates.
+            (id(state.servo_debug_mask)
+             if state.servo_debug_view and state.servo_debug_mask is not None
+             else None),
         )
         if new_recon_key != recon_cache_key or recon_cache_surf is None:
             recon_cache_surf = pygame.Surface(RECON_RECT.size, pygame.SRCALPHA)
@@ -278,6 +308,9 @@ def run(
                 small_font=small_font,
                 suggestion=suggestion,
                 queue_confidences=queue_confidences,
+                detection=state.servo_detection,
+                debug_mask=state.servo_debug_mask,
+                debug_view=state.servo_debug_view,
             )
             recon_cache_key = new_recon_key
         screen.blit(recon_cache_surf, RECON_RECT.topleft)
@@ -299,6 +332,7 @@ def run(
             calib_mode=state.calib_mode,
             auto_enabled=state.auto_enabled,
             device_supports_input=getattr(device, "supports_input", False),
+            servo_debug_view=state.servo_debug_view,
         )
 
         pygame.display.flip()
