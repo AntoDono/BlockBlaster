@@ -13,11 +13,17 @@ HOLD_MS              = 240   # dwell after DOWN before any MOVE (long-press grab
                              # Block Blast needs ~250 ms of stationary touch to
                              # register the piece pickup.
 PRE_LIFT_MS          = 260   # settle before UP so the game commits the place.
-INITIAL_LIFT_PX      = 350    # initial upward nudge so the piece pops above the
+INITIAL_LIFT_PX      = 300    # initial upward nudge so the piece pops above the
                              # finger (helps Block Blast confirm the piece is
                              # being dragged, not held).
 GRAB_Y_NUDGE_PX      = 100   # queue slot icon sits above slot_center; press
                              # this far above the center to actually grab.
+PRELIFT_CONFIRM_S    = 0.25   # after the pre-lift to board centre, wait up
+                             # to this long for the matcher to confirm the
+                             # piece is rendered before activating the PD
+                             # loop.  Avoids the PD steering off half-
+                             # drawn frames while Block Blast's drag
+                             # follower catches up.  Abort if exceeded.
 
 # ── SERVO: loop pacing ──────────────────────────────────────────────────
 MAX_LOOP_S           = 2.0   # total servo budget per placement.

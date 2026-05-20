@@ -46,6 +46,7 @@ from blockblaster.config.params import (
     MOVE_SUBSTEPS,
     NEAR_ERR_PX,
     PRE_LIFT_MS,
+    PRELIFT_CONFIRM_S,
     SETTLE_MS,
 )
 from blockblaster.control.coords import slot_center_px
@@ -332,6 +333,38 @@ def place(
             finger = next_finger
             time.sleep(SETTLE_MS / 1000)
 
+            # ── Wait for the piece to actually be rendered & detected at
+            # the centered pre-lift position before letting the PD loop
+            # take over.  Otherwise the first few iters either count as
+            # `no_piece` (piece not yet drawn) or steer off a half-drawn
+            # match while Block Blast's drag follower is still catching
+            # up to the pre-lift move.  We give it up to PRELIFT_CONFIRM_S
+            # seconds to produce one good detection; if it never does, we
+            # abort the placement rather than blindly servoing.
+            _, last_fid = device.get_latest_with_id()
+            confirm_deadline = time.monotonic() + PRELIFT_CONFIRM_S
+            confirmed = False
+            while time.monotonic() < confirm_deadline:
+                frame, fid = _wait_frame(device, last_fid, FRAME_TIMEOUT_S)
+                if frame is None:
+                    continue
+                last_fid = fid
+                cells_measured, score, _, _ = _locate_piece(
+                    frame, cfg.grid, suggestion.piece, baseline_gray,
+                )
+                if cells_measured and score >= LOCK_SCORE_MIN:
+                    confirmed = True
+                    print(
+                        f"[servo] pre-lift confirmed "
+                        f"(score={score:.2f}, cells={len(cells_measured)})"
+                    )
+                    break
+            if not confirmed:
+                print("[servo] pre-lift confirmation timeout; aborting")
+                time.sleep(PRE_LIFT_MS / 1000)
+                session.up()
+                return False
+
             deadline = time.monotonic() + MAX_LOOP_S
             no_piece   = 0
             iters      = 0
@@ -339,7 +372,6 @@ def place(
             prev_err_y: Optional[int] = None
             best_err_x = 10**9   # min |err_x| seen this run
             best_err_y = 10**9   # min |err_y| seen this run
-            _, last_fid = device.get_latest_with_id()
 
             while time.monotonic() < deadline:
                 iters += 1
