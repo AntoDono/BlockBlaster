@@ -36,12 +36,15 @@ from blockblaster.config.params import (
     LOCK_SCORE_MIN,
     LOCK_TOL_PX,
     MATCH_SCORE_MIN,
+    FAR_ERR_PX,
     MAX_LOOP_S,
     MAX_NO_PIECE_FRAMES,
-    MAX_STEP_PX,
+    MAX_STEP_FAR_PX,
+    MAX_STEP_NEAR_PX,
     MORPH_KERNEL_PX,
     MOVE_SUBSTEP_MS,
     MOVE_SUBSTEPS,
+    NEAR_ERR_PX,
     PRE_LIFT_MS,
     SETTLE_MS,
 )
@@ -317,7 +320,14 @@ def place(
             session.down(*to_dev(down_px))
             time.sleep(HOLD_MS / 1000)
 
-            next_finger = (down_px[0], down_px[1] - INITIAL_LIFT_PX)
+            # Pre-lift to the board's horizontal centre (not straight up
+            # from the queue slot).  A long horizontal piece grabbed from
+            # an edge queue slot would otherwise hang off the board and
+            # never get fully rendered → the matcher can't find it.
+            # Centering X keeps the piece's footprint on-board regardless
+            # of which slot it came from.
+            board_cx = int(round(cfg.grid.fx + cfg.grid.fw / 2))
+            next_finger = (board_cx, down_px[1] - INITIAL_LIFT_PX)
             _move_smooth(session, to_dev, down_px, next_finger)
             finger = next_finger
             time.sleep(SETTLE_MS / 1000)
@@ -451,8 +461,25 @@ def place(
                     ctrl_x = 0.0
                 if (p_y >= 0) != (ctrl_y >= 0):
                     ctrl_y = 0.0
-                dx = max(-MAX_STEP_PX, min(MAX_STEP_PX, int(ctrl_x)))
-                dy = max(-MAX_STEP_PX, min(MAX_STEP_PX, int(ctrl_y)))
+                # Distance-adaptive step ceiling: big jumps when far,
+                # small precise steps when close.  Per-axis so a piece
+                # aligned on x but far on y still gets a fast y step
+                # without throwing x off.
+                def _step_cap(err_mag: int) -> int:
+                    if err_mag >= FAR_ERR_PX:
+                        return MAX_STEP_FAR_PX
+                    if err_mag <= NEAR_ERR_PX:
+                        return MAX_STEP_NEAR_PX
+                    span = max(1, FAR_ERR_PX - NEAR_ERR_PX)
+                    t = (err_mag - NEAR_ERR_PX) / span
+                    return int(round(
+                        MAX_STEP_NEAR_PX
+                        + t * (MAX_STEP_FAR_PX - MAX_STEP_NEAR_PX)
+                    ))
+                cap_x = _step_cap(abs(err_x))
+                cap_y = _step_cap(abs(err_y))
+                dx = max(-cap_x, min(cap_x, int(ctrl_x)))
+                dy = max(-cap_y, min(cap_y, int(ctrl_y)))
                 next_finger = (finger[0] + dx, finger[1] + dy)
                 print(
                     f"[servo {iters}] err=({err_x:+d},{err_y:+d}) "

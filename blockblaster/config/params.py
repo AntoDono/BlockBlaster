@@ -13,7 +13,7 @@ HOLD_MS              = 240   # dwell after DOWN before any MOVE (long-press grab
                              # Block Blast needs ~250 ms of stationary touch to
                              # register the piece pickup.
 PRE_LIFT_MS          = 260   # settle before UP so the game commits the place.
-INITIAL_LIFT_PX      = 80    # initial upward nudge so the piece pops above the
+INITIAL_LIFT_PX      = 350    # initial upward nudge so the piece pops above the
                              # finger (helps Block Blast confirm the piece is
                              # being dragged, not held).
 GRAB_Y_NUDGE_PX      = 100   # queue slot icon sits above slot_center; press
@@ -31,7 +31,7 @@ MAX_NO_PIECE_FRAMES  = 8     # consecutive frames without a detected piece
 GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
                              # finger-px; smaller = larger steps for the
                              # same error, faster but more overshoot-prone.
-DERIV_GAIN           = 2.5   # D term.  Damps overshoot by anticipating
+DERIV_GAIN           = 2.1  # D term.  Damps overshoot by anticipating
                              # the piece's motion: when the error is
                              # shrinking (piece is already heading toward
                              # the target), the next step is reduced by
@@ -40,28 +40,33 @@ DERIV_GAIN           = 2.5   # D term.  Damps overshoot by anticipating
                              # damping; >2 will under-shoot and crawl.
 
 # ── SERVO: motion speed (primary knobs) ─────────────────────────────────
-# MAX_STEP_PX is the dominant speed control.  Lower = slower, smoother
-# drag (and more iters to reach a far target).  The finger never travels
-# more than this many frame pixels per servo iteration regardless of how
-# big the error is, so big errors get walked in over multiple iters
-# rather than jumping at full velocity into Block Blast's drag follower
-# (which lags fast moves and gives us stale visual feedback the next
-# frame).
-MAX_STEP_PX          = 48
+# Step ceiling is distance-adaptive: big jumps when far from target,
+# small precise steps when close.  The PD controller's P term already
+# scales with error, but we still need an upper bound per iter so we
+# don't outrun Block Blast's drag follower (it lags fast moves and
+# gives us stale visual feedback on the next frame).
+#
+#   |err| >= FAR_ERR_PX   → clamp to MAX_STEP_FAR_PX  (cover ground)
+#   |err| <= NEAR_ERR_PX  → clamp to MAX_STEP_NEAR_PX (fine alignment)
+#   in between            → linearly interpolated
+MAX_STEP_FAR_PX      = 64    # ceiling when |err| >= FAR_ERR_PX
+MAX_STEP_NEAR_PX     = 12    # ceiling when |err| <= NEAR_ERR_PX
+FAR_ERR_PX           = 150   # error magnitude considered "far"
+NEAR_ERR_PX          = 60    # error magnitude considered "near"
 
 # Each iteration's step is interpolated into MOVE_SUBSTEPS touch-MOVE
 # events spaced MOVE_SUBSTEP_MS apart, so Android sees a smooth drag
 # instead of a single ~MAX_STEP_PX teleport.  Block Blast renders its
 # drag follower much more reliably on continuous motion.
 MOVE_SUBSTEPS        = 32
-MOVE_SUBSTEP_MS      = 2
+MOVE_SUBSTEP_MS      = 4
 
 # ── SERVO: lock criteria ────────────────────────────────────────────────
-LOCK_TOL_PX          = 16    # |err| px tolerance on both axes.
-LOCK_SCORE_MIN       = 0.60  # required template-match score to release.
+LOCK_TOL_PX          = 32    # |err| px tolerance on both axes.
+LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
 
 # ── SERVO: detection (frame-diff + template match) ──────────────────────
-MATCH_SCORE_MIN      = 0.2  # below this, treat the frame as "no piece";
+MATCH_SCORE_MIN      = 0.3  # below this, treat the frame as "no piece";
                              # increment the no_piece counter.
 DIFF_THRESHOLD       = 25    # per-pixel grayscale abs-diff threshold for
                              # "this pixel moved since the baseline".
@@ -74,11 +79,11 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
 AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
                              # before the assist GUI will dispatch a servo.
-AUTO_POST_PLACE_MS   = 1500   # cooldown after the servo completes.
-AUTO_SERVO_BUDGET_MS = 2800  # outer cap on a single servo run, in ms.
+AUTO_POST_PLACE_MS   = 1200   # cooldown after the servo completes.
+AUTO_SERVO_BUDGET_MS = 3000  # outer cap on a single servo run, in ms.
 
 # ── AUTOPLAY: headless loop (control/auto_player.py) ────────────────────
-CONF_THRESHOLD       = 0.65  # skip a frame if any slot confidence is
+CONF_THRESHOLD       = 0.3  # skip a frame if any slot confidence is
                              # below this.
 POST_PLACE_MS        = 300   # wait after each swipe (animation + queue
                              # refresh).
