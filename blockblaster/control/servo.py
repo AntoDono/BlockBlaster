@@ -1,17 +1,93 @@
 """Closed-loop visual-servo placement (single-file rewrite).
 
-Detection is color- and palette-invariant: cache the grayscale board
-crop just before DOWN as a baseline, then per frame compute
+Detection
+=========
+Colour- and palette-invariant.  Cache the grayscale board crop just
+before DOWN as a baseline, then per frame compute
 ``cv2.absdiff(current_gray, baseline_gray)``, threshold to a binary
-"this pixel moved" mask, and refine the localisation by running
+"this pixel moved" mask (morph-closed), and run
 ``cv2.matchTemplate`` of the known piece silhouette against that
-motion mask.  The piece is the only thing moving on the board, so the
-diff lights up exactly its rendered footprint regardless of colour,
-translucency, or ghost-preview noise from the game itself.
+motion mask to get a rigid initial pose.  The piece is the only thing
+moving on the board, so the diff lights up exactly its rendered
+footprint regardless of colour, translucency, or ghost-preview noise
+from the game itself.  No tracker state between frames, no plant-gain
+learning, no coarse open-loop jump, no fallbacks.
 
-No tracker state between frames, no plant-gain learning, no coarse
-open-loop jump, no fallbacks.  If the matcher loses the piece for
-``MAX_NO_PIECE_FRAMES`` consecutive iters, abort.
+Per-frame measurement: 5 anchors
+================================
+Instead of one centroid we sample 5 anchors per frame and pair them
+positionally with their target positions:
+
+  - TL / TR / BL / BR: the extreme moving pixel in each corner
+    direction of the corresponding extreme cell of the piece
+    silhouette (e.g. for TL, the topmost-leftmost moving pixel in the
+    top-row leftmost cell).  Anchored to crisp silhouette edges →
+    robust to interior mass distribution.
+  - C: centre-of-mass of motion in the most-central cell of the
+    silhouette (elbow of an L, middle cell of a line, etc.).  Robust
+    to corner occlusions which would bias corner anchors.
+
+Anchors whose cell coverage falls below ``_CELL_MIN_COVERAGE`` are
+dropped from the per-frame error.  The controller's error is the mean
+of ``(target_i − measured_i)`` over the visible anchors, so partial
+occlusions (board edges, score popups, animation flashes) don't bias
+the average.
+
+Gesture
+=======
+1. DOWN on the queue slot (centre nudged up by ``GRAB_Y_NUDGE_PX``),
+   hold ``HOLD_MS`` so Block Blast registers the long-press grab.
+2. Pre-lift diagonally to ``(board_centre_x, slot_y − INITIAL_LIFT_PX)``
+   so wide pieces grabbed from edge slots don't hang off the board
+   and lose detection.
+3. Wait up to ``PRELIFT_CONFIRM_S`` for the matcher to confirm the
+   piece is rendered (≥1 anchor + score ≥ ``LOCK_SCORE_MIN``).  Abort
+   if it never confirms — better than blindly servoing a piece we
+   can't see.
+4. PD loop (below) until lock or budget.
+5. ``PRE_LIFT_MS`` settle, then UP.
+
+PD loop
+=======
+P scales with error (``err / GAIN``); D dampens by anticipating the
+piece's motion (``DERIV_GAIN * derr / GAIN``).  If D flips the sign
+of the P term it's nulled (let the piece coast one frame) — this
+prevents the spiral overshoot we hit when D was too aggressive near
+zero error.
+
+The per-iter step ceiling is **distance-adaptive**:
+
+  |err| ≥ FAR_ERR_PX   → cap = MAX_STEP_FAR_PX   (cover ground)
+  |err| ≤ NEAR_ERR_PX  → cap = MAX_STEP_NEAR_PX  (fine alignment)
+  in between           → linearly interpolated
+
+Per-axis, so a piece aligned on x but far on y still gets a fast y
+step without throwing x off.  ``MAX_STEP_FAR_PX`` is bounded by Block
+Blast's drag follower lag — go too fast and the next-frame match
+reads a stale position and the PD overshoots.
+
+Release
+=======
+The UP commits the placement, so the gate is conservative:
+
+  (tight_lock OR transit_lock) AND score ≥ LOCK_SCORE_MIN
+                                AND paired ≥ LOCK_MIN_ANCHORS
+
+  tight_lock:   |err_x| ≤ LOCK_TOL_PX AND |err_y| ≤ LOCK_TOL_PX
+  transit_lock: each axis was inside LOCK_TOL_PX at some point this
+                run AND is still within 2× tol now (catches a
+                diagonal pass-through where the axes peak on
+                different frames).
+
+``LOCK_MIN_ANCHORS`` (default 2) lets edge placements release when
+some corner anchors are off-board — the mean-of-visible error is
+still accurate from as few as 2 anchors.
+
+If the matcher loses the piece for ``MAX_NO_PIECE_FRAMES``
+consecutive iters, abort.  If the ``MAX_LOOP_S`` budget elapses
+without lock, lift in place rather than dragging back to the queue.
+
+All tunables live in :mod:`blockblaster.config.params`.
 """
 
 from __future__ import annotations
@@ -33,6 +109,7 @@ from blockblaster.config.params import (
     GRAB_Y_NUDGE_PX,
     HOLD_MS,
     INITIAL_LIFT_PX,
+    LOCK_MIN_ANCHORS,
     LOCK_SCORE_MIN,
     LOCK_TOL_PX,
     MATCH_SCORE_MIN,
@@ -507,7 +584,12 @@ def place(
                 if state is not None:
                     state.servo_measured_px = (int(meas_cx_mean), int(meas_cy_mean))
 
-                all_cells_visible = paired == len(target_anchors_xy)
+                # Edge placements often only show 2-3 anchors (corner
+                # cells off the board, score popup occlusion, etc.).
+                # The mean-of-visible error is still accurate, so accept
+                # the lock as long as at least LOCK_MIN_ANCHORS are
+                # visible rather than requiring all 5.
+                enough_anchors = paired >= LOCK_MIN_ANCHORS
                 best_err_x = min(best_err_x, abs(err_x))
                 best_err_y = min(best_err_y, abs(err_y))
 
@@ -525,7 +607,7 @@ def place(
                                 and abs(err_y) <= 2 * LOCK_TOL_PX)
                 if ((tight_lock or transit_lock)
                         and score >= LOCK_SCORE_MIN
-                        and all_cells_visible):
+                        and enough_anchors):
                     kind = "TIGHT" if tight_lock else "TRANSIT"
                     print(
                         f"[servo {iters}] LOCK[{kind}] err=({err_x:+d},{err_y:+d}) "

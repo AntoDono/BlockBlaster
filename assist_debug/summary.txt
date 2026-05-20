@@ -1,40 +1,26 @@
 === Slot 1 ===
-  fill_pixels   : 26244
-  has_piece     : True
-  bbox (x,y→x,y): (92, 105, 254, 267)
-  best fit      : 1 rows × 1 cols  (cell 162.0 × 162.0px)
-  pattern       :
-                  X
-  best score    : 1.000
-  top candidates:
-    1.000  1x1         (1×1)
-  → result      : 1x1
+  fill_pixels   : 0
+  has_piece     : False
+  → result      : None
 
 === Slot 2 ===
-  fill_pixels   : 9546
-  has_piece     : True
-  bbox (x,y→x,y): (79, 133, 238, 237)
-  best fit      : 2 rows × 3 cols  (cell 52.0 × 53.0px)
-  pattern       :
-                  ..X
-                  XXX
-  best score    : 0.981
-  top candidates:
-    0.981  L_3_BL      (2×3)
-    0.654  2x3         (2×3)
-    0.654  L_3_BR      (2×3)
-    0.654  S_H         (2×3)
-    0.654  T_U         (2×3)
-  → result      : L_3_BL
+  fill_pixels   : 0
+  has_piece     : False
+  → result      : None
 
 === Slot 3 ===
-  fill_pixels   : 26070
+  fill_pixels   : 11609
   has_piece     : True
-  bbox (x,y→x,y): (65, 105, 226, 267)
-  best fit      : 1 rows × 1 cols  (cell 162.0 × 161.0px)
+  bbox (x,y→x,y): (113, 109, 167, 324)
+  best fit      : 4 rows × 1 cols  (cell 53.8 × 54.0px)
   pattern       :
                   X
-  best score    : 0.994
+                  X
+                  X
+                  X
+  best score    : 0.946
   top candidates:
-    0.994  1x1         (1×1)
-  → result      : 1x1
+    0.946  4x1         (4×1)
+    0.756  5x1         (5×1)
+    0.716  3x1         (3×1)
+  → result      : 4x1

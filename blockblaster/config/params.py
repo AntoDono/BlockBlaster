@@ -39,7 +39,7 @@ MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
 GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
                              # finger-px; smaller = larger steps for the
                              # same error, faster but more overshoot-prone.
-DERIV_GAIN           = 2.1  # D term.  Damps overshoot by anticipating
+DERIV_GAIN           = 2.2   # D term.  Damps overshoot by anticipating
                              # the piece's motion: when the error is
                              # shrinking (piece is already heading toward
                              # the target), the next step is reduced by
@@ -72,9 +72,16 @@ MOVE_SUBSTEP_MS      = 2
 # ── SERVO: lock criteria ────────────────────────────────────────────────
 LOCK_TOL_PX          = 6    # |err| px tolerance on both axes.
 LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
+LOCK_MIN_ANCHORS     = 2     # minimum visible anchors (out of 5) the
+                             # release will accept.  Was "all 5" before,
+                             # but edge placements (corner cells off the
+                             # board, occluded by score popups, etc.)
+                             # routinely show only 2-3 anchors even when
+                             # the piece is dead on target → servo
+                             # burned the whole budget at zero error.
 
 # ── SERVO: detection (frame-diff + template match) ──────────────────────
-MATCH_SCORE_MIN      = 0.3  # below this, treat the frame as "no piece";
+MATCH_SCORE_MIN      = 0.5  # below this, treat the frame as "no piece";
                              # increment the no_piece counter.
 DIFF_THRESHOLD       = 25    # per-pixel grayscale abs-diff threshold for
                              # "this pixel moved since the baseline".
