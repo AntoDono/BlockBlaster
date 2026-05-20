@@ -26,12 +26,14 @@ PRELIFT_CONFIRM_S    = 0.25   # after the pre-lift to board centre, wait up
                              # follower catches up.  Abort if exceeded.
 
 # ── SERVO: loop pacing ──────────────────────────────────────────────────
-MAX_LOOP_S           = 2.0   # total servo budget per placement.
+MAX_LOOP_S           = 8.0   # total servo budget per placement.
 SETTLE_MS            = 50    # sleep after each move() so the next frame
                              # samples a settled piece.
 FRAME_TIMEOUT_S      = 0.03  # how long to wait for a fresh frame per iter.
-MAX_NO_PIECE_FRAMES  = 8     # consecutive frames without a detected piece
-                             # before giving up.
+MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
+                             # before giving up.  Higher = more patience
+                             # when the matcher briefly loses the piece
+                             # (occlusion, animation flash, etc.).
 
 # ── SERVO: PD controller ────────────────────────────────────────────────
 GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
@@ -64,11 +66,11 @@ NEAR_ERR_PX          = 60    # error magnitude considered "near"
 # events spaced MOVE_SUBSTEP_MS apart, so Android sees a smooth drag
 # instead of a single ~MAX_STEP_PX teleport.  Block Blast renders its
 # drag follower much more reliably on continuous motion.
-MOVE_SUBSTEPS        = 32
-MOVE_SUBSTEP_MS      = 4
+MOVE_SUBSTEPS        = 64
+MOVE_SUBSTEP_MS      = 2
 
 # ── SERVO: lock criteria ────────────────────────────────────────────────
-LOCK_TOL_PX          = 32    # |err| px tolerance on both axes.
+LOCK_TOL_PX          = 6    # |err| px tolerance on both axes.
 LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
 
 # ── SERVO: detection (frame-diff + template match) ──────────────────────
@@ -86,7 +88,7 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
 AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
                              # before the assist GUI will dispatch a servo.
 AUTO_POST_PLACE_MS   = 1200   # cooldown after the servo completes.
-AUTO_SERVO_BUDGET_MS = 3000  # outer cap on a single servo run, in ms.
+AUTO_SERVO_BUDGET_MS = 10000  # outer cap on a single servo run, in ms.
 
 # ── AUTOPLAY: headless loop (control/auto_player.py) ────────────────────
 CONF_THRESHOLD       = 0.3  # skip a frame if any slot confidence is

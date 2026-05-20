@@ -15,3 +15,5 @@ checkpoints/
 synth_debug
 assist_config_*.json
 assist_config.json
+screenshots/
+servo_debug/

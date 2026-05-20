@@ -59,6 +59,11 @@ def _run_servo_safely(
         state.frozen_queue       = []
         state.frozen_confidences = []
         analyzer.resume()
+        # Shorten the dispatch gate to "now + post-place cooldown" so
+        # the next placement can fire as soon as this one actually
+        # finished, instead of waiting out the full AUTO_SERVO_BUDGET_MS
+        # we reserved at dispatch time as a worst-case upper bound.
+        state.auto_busy_until = pygame.time.get_ticks() + AUTO_POST_PLACE_MS
 
 
 def maybe_execute_auto_swipe(

@@ -106,14 +106,60 @@ def _make_template(piece: Piece, cell_h: int, cell_w: int) -> np.ndarray:
     return tpl
 
 
-# Per-cell measurement: (cell_dr, cell_dc, fx, fy, coverage_0_to_1).
-PerCellMeasurement = tuple[int, int, float, float, float]
+# Per-anchor measurement: (anchor_idx, fx, fy, coverage_0_to_1).
+# anchor_idx ∈ {0..4} indexes the list returned by _piece_anchors:
+# 0=TL, 1=TR, 2=BL, 3=BR corners + 4=centroid of the most-central cell.
+AnchorMeasurement = tuple[int, float, float, float]
 
-# Minimum fraction of moved pixels inside a cell window for that cell
-# to count as "visible".  Below this we drop the cell from the error
-# average; lets the controller stay accurate when part of the piece is
-# off-screen or occluded by score popups, etc.
+# Anchor kinds: 4 corners + a centroid measurement of one cell.  The
+# corner anchors are robust to interior mass distribution (anchored to
+# silhouette edges); the centroid anchor is robust to corner noise
+# (one corner cell going partially occluded biases corners; the
+# central cell rarely is occluded).  Together they cross-check each
+# other.
+#   ("TL", "TR", "BL", "BR"): cx, cy ∈ {0, 1} edge of the chosen cell.
+#   ("C",): centroid of that cell's motion mask.
+AnchorKind = str  # 'TL' | 'TR' | 'BL' | 'BR' | 'C'
+_ANCHOR_NAMES = ("TL", "TR", "BL", "BR", "C")
+
+# Minimum fraction of moved pixels inside an anchor cell's window for
+# that anchor to count as "visible".  Below this we drop it from the
+# error average; lets the controller stay accurate when part of the
+# piece is off-screen or occluded by score popups, etc.
 _CELL_MIN_COVERAGE = 0.15
+
+
+def _piece_anchors(
+    piece: Piece,
+) -> list[tuple[int, int, AnchorKind]]:
+    """Return ``[(dr, dc, kind)]`` for the piece's 4 corners + 1 centroid.
+
+    Corners are the extreme occupied cell of the silhouette in each
+    direction (so non-rectangular pieces report corners that actually
+    exist).  The centroid anchor uses the cell whose position is
+    closest to the piece's geometric centre — for an O it's any of the
+    four; for an L it's the elbow; for a 1×4 line it's a middle cell.
+    """
+    top_dr = min(dr for dr, _ in piece.cells)
+    bot_dr = max(dr for dr, _ in piece.cells)
+    top_dcs = [dc for dr, dc in piece.cells if dr == top_dr]
+    bot_dcs = [dc for dr, dc in piece.cells if dr == bot_dr]
+
+    # Geometric centre of the piece in (dr, dc) space.
+    cdr = sum(dr for dr, _ in piece.cells) / len(piece.cells)
+    cdc = sum(dc for _, dc in piece.cells) / len(piece.cells)
+    centre_dr, centre_dc = min(
+        piece.cells,
+        key=lambda c: (c[0] - cdr) ** 2 + (c[1] - cdc) ** 2,
+    )
+
+    return [
+        (top_dr, min(top_dcs), "TL"),
+        (top_dr, max(top_dcs), "TR"),
+        (bot_dr, min(bot_dcs), "BL"),
+        (bot_dr, max(bot_dcs), "BR"),
+        (centre_dr, centre_dc, "C"),
+    ]
 
 
 def _locate_piece(
@@ -122,10 +168,10 @@ def _locate_piece(
     piece: Piece,
     baseline_gray: np.ndarray,
 ) -> tuple[
-    list[PerCellMeasurement], float,
+    list[AnchorMeasurement], float,
     Optional[tuple[int, int]], np.ndarray,
 ]:
-    """Return ``(cells_measured, rigid_score, top_left_cell_rc, motion_mask)``.
+    """Return ``(anchors_measured, rigid_score, top_left_cell_rc, motion_mask)``.
 
     Pipeline:
 
@@ -133,13 +179,19 @@ def _locate_piece(
        → morph-close = motion mask.
     2. ``cv2.matchTemplate`` of the piece's binary silhouette to get a
        rigid initial position.
-    3. For each ``(dr, dc)`` of the piece, run ``cv2.moments`` on the
-       cell-sized window at the matched top-left + ``(dr*ch, dc*cw)``
-       to get that cell's actual center-of-mass.  Drop cells whose
-       motion coverage is below :data:`_CELL_MIN_COVERAGE` so partial
-       occlusions don't bias the controller's error.
+    3. For each piece anchor (4 corners + 1 central cell centroid),
+       inspect the corresponding cell's window in the motion mask:
+       - Corner anchor: take the extreme moving pixel in that corner's
+         direction (TL: topmost-leftmost; BR: bottommost-rightmost; …).
+         Anchored to crisp silhouette edges, robust to interior mass.
+       - Centroid anchor: take the centre-of-mass of motion pixels in
+         the chosen central cell.  Robust to corner-cell occlusions
+         which would bias corner anchors.
+       The two anchor types cross-check each other.  Anchors whose
+       cell coverage falls below :data:`_CELL_MIN_COVERAGE` are
+       dropped so partial occlusions don't poison the error.
 
-    ``cells_measured`` is empty when the rigid match scores below
+    ``anchors_measured`` is empty when the rigid match scores below
     :data:`MATCH_SCORE_MIN`.  ``motion_mask`` is always returned for
     the GUI debug view.
     """
@@ -164,11 +216,11 @@ def _locate_piece(
     if score < MATCH_SCORE_MIN:
         return [], score, (tl_row, tl_col), search
 
-    # ── Per-cell refinement ─────────────────────────────────────────
+    # ── Per-anchor refinement ───────────────────────────────────────
     cell_area_px = cell_h * cell_w
     min_coverage_px = int(cell_area_px * _CELL_MIN_COVERAGE)
-    cells_measured: list[PerCellMeasurement] = []
-    for (dr, dc) in piece.cells:
+    anchors_measured: list[AnchorMeasurement] = []
+    for idx, (dr, dc, kind) in enumerate(_piece_anchors(piece)):
         cy0 = top_left[1] + dr * cell_h
         cx0 = top_left[0] + dc * cell_w
         window = search[cy0:cy0 + cell_h, cx0:cx0 + cell_w]
@@ -177,19 +229,26 @@ def _locate_piece(
         coverage_px = int(np.count_nonzero(window))
         if coverage_px < min_coverage_px:
             continue
-        m = cv2.moments(window, binaryImage=True)
-        if m["m00"] == 0:
-            continue
-        local_x = m["m10"] / m["m00"]
-        local_y = m["m01"] / m["m00"]
-        # Full-frame pixel coordinates of this cell's centre-of-mass.
+        if kind == "C":
+            m = cv2.moments(window, binaryImage=True)
+            if m["m00"] == 0:
+                continue
+            local_x = m["m10"] / m["m00"]
+            local_y = m["m01"] / m["m00"]
+        else:
+            ys, xs = np.where(window > 0)
+            if xs.size == 0:
+                continue
+            # Extreme moving pixel in this corner's direction.
+            local_x = float(xs.max() if kind in ("TR", "BR") else xs.min())
+            local_y = float(ys.max() if kind in ("BL", "BR") else ys.min())
         fx = float(grid.fx + cx0 + local_x)
         fy = float(grid.fy + cy0 + local_y)
-        cells_measured.append((
-            int(dr), int(dc), fx, fy, coverage_px / float(cell_area_px),
+        anchors_measured.append((
+            idx, fx, fy, coverage_px / float(cell_area_px),
         ))
 
-    return cells_measured, score, (tl_row, tl_col), search
+    return anchors_measured, score, (tl_row, tl_col), search
 
 
 # ── Motion helper ─────────────────────────────────────────────────────────
@@ -281,25 +340,34 @@ def place(
             return (int(round(p[0] * sx)), int(round(p[1] * sy)))
 
         # ── Targets ───────────────────────────────────────────────────
-        # Per-cell target centres: one (fx, fy) per piece cell, in
-        # full-frame pixels.  The controller's error is the mean of
-        # (target_i − measured_i) over the cells the matcher can
+        # Five target anchors of the piece silhouette in full-frame
+        # pixels: 4 corner extremes + 1 centre-of-mass of the most-
+        # central cell.  The controller's error is the mean of
+        # (target_i − measured_i) over the anchors the matcher can
         # actually see this frame — partial occlusions stop biasing
-        # the average.
+        # the average.  Corners are anchored to silhouette edges
+        # (low interior drift); the centroid is robust to corner
+        # occlusions.  Together they cross-check each other.
         cell_w = cfg.grid.fw / BOARD_SIZE
         cell_h = cfg.grid.fh / BOARD_SIZE
-        target_cells_xy: list[tuple[float, float]] = []
-        for (dr, dc) in suggestion.piece.cells:
-            tcx = cfg.grid.fx + (suggestion.col + dc + 0.5) * cell_w
-            tcy = cfg.grid.fy + (suggestion.row + dr + 0.5) * cell_h
-            target_cells_xy.append((tcx, tcy))
-        target_cx_mean = sum(p[0] for p in target_cells_xy) / len(target_cells_xy)
-        target_cy_mean = sum(p[1] for p in target_cells_xy) / len(target_cells_xy)
+        anchor_defs = _piece_anchors(suggestion.piece)
+        target_anchors_xy: list[tuple[float, float]] = []
+        for (dr, dc, kind) in anchor_defs:
+            if kind == "C":
+                ox, oy = 0.5, 0.5
+            else:
+                ox = 1.0 if kind in ("TR", "BR") else 0.0
+                oy = 1.0 if kind in ("BL", "BR") else 0.0
+            tcx = cfg.grid.fx + (suggestion.col + dc + ox) * cell_w
+            tcy = cfg.grid.fy + (suggestion.row + dr + oy) * cell_h
+            target_anchors_xy.append((tcx, tcy))
+        target_cx_mean = sum(p[0] for p in target_anchors_xy) / len(target_anchors_xy)
+        target_cy_mean = sum(p[1] for p in target_anchors_xy) / len(target_anchors_xy)
 
         if state is not None:
             state.servo_target_px = (int(target_cx_mean), int(target_cy_mean))
             state.servo_measured_px = None
-            state.servo_target_cells = [(int(x), int(y)) for x, y in target_cells_xy]
+            state.servo_target_cells = [(int(x), int(y)) for x, y in target_anchors_xy]
             state.servo_measured_cells = []
 
         slot_cx, slot_cy = slot_center_px(cfg.queue, suggestion.slot)
@@ -349,14 +417,14 @@ def place(
                 if frame is None:
                     continue
                 last_fid = fid
-                cells_measured, score, _, _ = _locate_piece(
+                anchors_measured, score, _, _ = _locate_piece(
                     frame, cfg.grid, suggestion.piece, baseline_gray,
                 )
-                if cells_measured and score >= LOCK_SCORE_MIN:
+                if anchors_measured and score >= LOCK_SCORE_MIN:
                     confirmed = True
                     print(
                         f"[servo] pre-lift confirmed "
-                        f"(score={score:.2f}, cells={len(cells_measured)})"
+                        f"(score={score:.2f}, anchors={len(anchors_measured)}/5)"
                     )
                     break
             if not confirmed:
@@ -380,11 +448,11 @@ def place(
                     continue
                 last_fid = fid
 
-                cells_measured, score, tl_rc, motion = _locate_piece(
+                anchors_measured, score, tl_rc, motion = _locate_piece(
                     frame, cfg.grid, suggestion.piece, baseline_gray,
                 )
 
-                if not cells_measured:
+                if not anchors_measured:
                     _publish(None, mask=motion, measured_cells=[])
                     if state is not None:
                         state.servo_measured_px = None
@@ -400,16 +468,16 @@ def place(
                     continue
                 no_piece = 0
 
-                # ── Per-cell error: mean of (target_i − measured_i)
-                # over only the cells the matcher could actually see
-                # this frame.
-                measured_cells_xy = [(c[2], c[3]) for c in cells_measured]
-                measured_set = {(c[0], c[1]): (c[2], c[3]) for c in cells_measured}
+                # ── Per-anchor error: mean of (target_i − measured_i)
+                # over only the anchors the matcher could actually see
+                # this frame.  Paired by anchor index (TL/TR/BL/BR/C).
+                measured_anchors_xy = [(c[1], c[2]) for c in anchors_measured]
+                measured_by_idx = {c[0]: (c[1], c[2]) for c in anchors_measured}
                 err_sum_x = 0.0
                 err_sum_y = 0.0
                 paired = 0
-                for (dr, dc), (tx, ty) in zip(suggestion.piece.cells, target_cells_xy):
-                    m = measured_set.get((dr, dc))
+                for idx, (tx, ty) in enumerate(target_anchors_xy):
+                    m = measured_by_idx.get(idx)
                     if m is None:
                         continue
                     err_sum_x += tx - m[0]
@@ -423,8 +491,8 @@ def place(
                 err_y = int(err_sum_y / paired)
 
                 # Aggregate "where is the piece" for the headline dot.
-                meas_cx_mean = sum(p[0] for p in measured_cells_xy) / len(measured_cells_xy)
-                meas_cy_mean = sum(p[1] for p in measured_cells_xy) / len(measured_cells_xy)
+                meas_cx_mean = sum(p[0] for p in measured_anchors_xy) / len(measured_anchors_xy)
+                meas_cy_mean = sum(p[1] for p in measured_anchors_xy) / len(measured_anchors_xy)
 
                 if tl_rc is not None:
                     _publish(
@@ -434,12 +502,12 @@ def place(
                             score,
                         ),
                         mask=motion,
-                        measured_cells=[(int(x), int(y)) for x, y in measured_cells_xy],
+                        measured_cells=[(int(x), int(y)) for x, y in measured_anchors_xy],
                     )
                 if state is not None:
                     state.servo_measured_px = (int(meas_cx_mean), int(meas_cy_mean))
 
-                all_cells_visible = paired == len(suggestion.piece.cells)
+                all_cells_visible = paired == len(target_anchors_xy)
                 best_err_x = min(best_err_x, abs(err_x))
                 best_err_y = min(best_err_y, abs(err_y))
 
@@ -462,8 +530,7 @@ def place(
                     print(
                         f"[servo {iters}] LOCK[{kind}] err=({err_x:+d},{err_y:+d}) "
                         f"best=({best_err_x},{best_err_y}) "
-                        f"score={score:.2f} cells={paired}/"
-                        f"{len(suggestion.piece.cells)}"
+                        f"score={score:.2f} anchors={paired}/5"
                     )
                     time.sleep(PRE_LIFT_MS / 1000)
                     session.up()
@@ -516,9 +583,8 @@ def place(
                 print(
                     f"[servo {iters}] err=({err_x:+d},{err_y:+d}) "
                     f"derr=({derr_x:+d},{derr_y:+d}) "
-                    f"score={score:.2f} cells={paired}/"
-                    f"{len(suggestion.piece.cells)} step=({dx:+d},{dy:+d}) "
-                    f"finger={next_finger}"
+                    f"score={score:.2f} anchors={paired}/5 "
+                    f"step=({dx:+d},{dy:+d}) finger={next_finger}"
                 )
                 prev_err_x, prev_err_y = err_x, err_y
                 _move_smooth(session, to_dev, finger, next_finger)
