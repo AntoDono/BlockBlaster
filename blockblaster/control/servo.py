@@ -87,6 +87,26 @@ If the matcher loses the piece for ``MAX_NO_PIECE_FRAMES``
 consecutive iters, abort.  If the ``MAX_LOOP_S`` budget elapses
 without lock, lift in place rather than dragging back to the queue.
 
+Pre-clear glow early release
+============================
+When the held piece is over a placement that would clear a row or
+column, Block Blast pre-renders a glow over the cells that would
+clear.  That glow paints the motion-diff mask far beyond the piece's
+own footprint and can fool the template matcher into reporting a
+stale position (the reconstructed scene shows the piece "stuck" in
+the upper board even though it has visually already dropped into the
+bottom row).  The piece is, by definition, on an optimal placement
+when the glow appears, so we just release.
+
+The check sits *before* the matcher-driven PD logic each iter, so it
+fires even when the glow has already confused the matcher:
+
+  motion_mask_area > GLOW_AREA_RATIO × piece_silhouette_area,
+  sustained for ≥ GLOW_HOLD_S → ``session.up()`` and return True.
+
+The persistence requirement is what prevents a one-frame flash (score
+popup, transient animation) from accidentally committing a placement.
+
 All tunables live in :mod:`blockblaster.config.params`.
 """
 
@@ -106,6 +126,8 @@ from blockblaster.config.params import (
     DIFF_THRESHOLD,
     FRAME_TIMEOUT_S,
     GAIN,
+    GLOW_AREA_RATIO,
+    GLOW_HOLD_S,
     GRAB_Y_NUDGE_PX,
     HOLD_MS,
     INITIAL_LIFT_PX,
@@ -517,6 +539,16 @@ def place(
             prev_err_y: Optional[int] = None
             best_err_x = 10**9   # min |err_x| seen this run
             best_err_y = 10**9   # min |err_y| seen this run
+            # Pre-clear glow tracker: when Block Blast previews a
+            # row/column clear, the motion mask balloons way past the
+            # piece's silhouette area.  We only commit if that condition
+            # holds for GLOW_HOLD_S consecutive seconds, so a transient
+            # flash (score popup, etc.) can't trigger an early release.
+            glow_start_t: Optional[float] = None
+            piece_area_cells = len(suggestion.piece.cells)
+            cell_h_int = max(1, cfg.grid.fh // BOARD_SIZE)
+            cell_w_int = max(1, cfg.grid.fw // BOARD_SIZE)
+            piece_area_px = piece_area_cells * cell_h_int * cell_w_int
 
             while time.monotonic() < deadline:
                 iters += 1
@@ -528,6 +560,32 @@ def place(
                 anchors_measured, score, tl_rc, motion = _locate_piece(
                     frame, cfg.grid, suggestion.piece, baseline_gray,
                 )
+
+                # ── Pre-clear glow detector ──────────────────────────
+                # If the motion mask covers far more area than the
+                # piece's own silhouette could account for, Block
+                # Blast is almost certainly rendering a row/column
+                # clear glow under the held piece — which means we're
+                # on an optimal placement.  Require GLOW_HOLD_S of
+                # sustained glow before committing so a one-frame
+                # flash can't trigger us.
+                mask_area_px = int(np.count_nonzero(motion))
+                if mask_area_px > GLOW_AREA_RATIO * piece_area_px:
+                    now = time.monotonic()
+                    if glow_start_t is None:
+                        glow_start_t = now
+                    elif now - glow_start_t >= GLOW_HOLD_S:
+                        print(
+                            f"[servo {iters}] PRE-CLEAR GLOW sustained "
+                            f"{now - glow_start_t:.2f}s "
+                            f"(mask={mask_area_px}px vs piece={piece_area_px}px) "
+                            f"→ release"
+                        )
+                        time.sleep(PRE_LIFT_MS / 1000)
+                        session.up()
+                        return True
+                else:
+                    glow_start_t = None
 
                 if not anchors_measured:
                     _publish(None, mask=motion, measured_cells=[])

@@ -157,6 +157,35 @@ If the matcher loses the piece for `MAX_NO_PIECE_FRAMES` consecutive
 iters, abort. If `MAX_LOOP_S` elapses without lock, lift in place
 (don't drag back to the queue).
 
+### Pre-clear glow early release
+
+When the held piece is hovering over a position that would complete a
+row or column, Block Blast pre-renders a glow over the cells that
+would clear. That glow paints the motion-diff mask far beyond the
+piece's own footprint and can fool the template matcher into reporting
+a stale position — the controller then sees a phantom error and
+chases pixels that aren't really the piece. (Symptom: the reconstructed
+scene shows the just-placed piece "stuck" up in the board while
+visually it has already dropped into the bottom row.)
+
+The piece is, by definition, on an optimal placement when the glow
+appears, so we just release. The check sits before the matcher-driven
+PD logic so it works even when the glow has already confused the
+matcher:
+
+```
+mask_area_px = nonzero(motion_mask)
+piece_area_px = len(piece.cells) * cell_h * cell_w
+if mask_area_px > GLOW_AREA_RATIO * piece_area_px:
+    sustained for ≥ GLOW_HOLD_S?  → session.up(), return True
+else:
+    reset the glow timer
+```
+
+The `GLOW_HOLD_S` persistence guard (default 1.0 s) is what stops a
+one-frame flash — score popup, brief animation, etc. — from
+accidentally committing a placement we didn't intend.
+
 All tunables live in [`blockblaster/config/params.py`](../blockblaster/config/params.py).
 
 ### Code layout

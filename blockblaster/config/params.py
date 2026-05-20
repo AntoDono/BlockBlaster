@@ -90,6 +90,23 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
                              # to match the baseline, so the template
                              # correlates against a solid blob.
 
+# ── SERVO: pre-clear glow early release ─────────────────────────────────
+# When the held piece is hovering over a placement that would complete a
+# row/column, Block Blast renders a glow preview over the cells that
+# would clear.  That glow lights up the motion-diff mask far beyond the
+# piece's own footprint and confuses the template matcher (suddenly
+# "the piece" looks like a whole row).  The piece is also, by definition,
+# already at an optimal placement when the glow appears — so we just
+# release.  Persistence guard avoids reacting to single-frame flashes
+# (score popups, transient animations) that aren't actual row-clear
+# previews.
+GLOW_AREA_RATIO      = 1.5   # motion-mask area / piece silhouette area.
+                             # Above this = much more is lit up than just
+                             # the piece → likely a row-clear glow.
+GLOW_HOLD_S          = 0.3   # sustained duration above the ratio before
+                             # we commit.  Long enough to filter out
+                             # transient flashes we didn't intend.
+
 
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
 AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
