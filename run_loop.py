@@ -30,6 +30,28 @@ def main() -> None:
     best_median_ever = float("-inf")
     best_median_round = 0
 
+    # ── Calibration ─────────────────────────────────────────────────────
+    # If a champion already exists, measure it ONCE on the eval seed so
+    # the very first challenger has a real bar to clear (not −∞).  This
+    # is the same seed challengers will use, so it's a fair comparison.
+    # Skipped when no BEST exists — in that case the first promotion-
+    # eligible round bootstraps the bar itself.
+    if Path(param.BEST_CHECKPOINT_PATH).exists():
+        print("\n[Calibration] Measuring existing champion on eval seed...")
+        t0 = time.time()
+        calib_stats = run_simulations(
+            force_checkpoint=False, base_seed=param.SIM_SEED
+        )
+        best_median_ever = calib_stats["median"]
+        best_median_round = 0
+        if calib_stats["max"] > best_score_ever:
+            best_score_ever = calib_stats["max"]
+        print(
+            f"  Champion baseline: median={best_median_ever:.1f}  "
+            f"max={calib_stats['max']}  (challengers must beat median to promote)"
+        )
+        print(f"  Done in {time.time() - t0:.1f}s")
+
     for round_num in range(1, args.rounds + 1):
         divider = "=" * 50
         print(f"\n{divider}")
@@ -43,9 +65,16 @@ def main() -> None:
         round_label = "EVAL (challenger)" if is_eval_round else "champion"
 
         # ── Simulate ────────────────────────────────────────────────────
+        # Eval rounds use a FIXED seed (param.SIM_SEED) so champion and
+        # challenger are evaluated on identical piece sequences — a fair,
+        # noise-free A/B.  Data-collection (champion) rounds vary the seed
+        # by round_num, otherwise SIM_EPSILON=0 + deterministic greedy
+        # policy produces byte-identical episodes every round and the
+        # replay pool stops growing in variety.
+        round_seed = param.SIM_SEED if is_eval_round else param.SIM_SEED + round_num
         print(f"\n[Round {round_num}] Simulating {param.NUM_SIMULATIONS} episodes — {round_label}...")
         t0 = time.time()
-        stats = run_simulations(force_checkpoint=is_eval_round)
+        stats = run_simulations(force_checkpoint=is_eval_round, base_seed=round_seed)
         print(f"  Done in {time.time() - t0:.1f}s")
 
         if stats["max"] > best_score_ever:
@@ -53,11 +82,14 @@ def main() -> None:
             best_score_round = round_num
 
         # Promotion is only meaningful when the source isn't already BEST.
-        # That's the case on (a) eval rounds (forced CHECKPOINT), and
-        # (b) early normal rounds before BEST exists (resolver falls back
-        # to CHECKPOINT).  When sim used BEST itself, we deliberately do
-        # NOT update best_median_ever — that prevents sampling noise from
-        # ratcheting the champion's bar upward without a real promotion.
+        # That's the case on (a) eval rounds (forced CHECKPOINT, run on
+        # SIM_SEED) and (b) early rounds before BEST exists (resolver
+        # falls back to CHECKPOINT).  Champion data-collection rounds run
+        # on varied seeds (SIM_SEED + round_num) — their medians are NOT
+        # comparable to challengers' (different piece sequences), so they
+        # never update the bar.  The bar is set by the startup calibration
+        # and then advances only on actual promotions, where the new
+        # champion's measured-on-SIM_SEED median replaces it.
         # We compare on MEDIAN (not mean) so a single lucky max-score
         # episode can't tip the decision.
         sim_source = stats.get("checkpoint_path")

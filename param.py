@@ -10,8 +10,8 @@ QUEUE_SIZE: int = 3
 # Rewards
 # ---------------------------------------------------------------------------
 REWARD_PER_CELL: float = 1.0
-REWARD_PER_LINE: float = 10.0
-MULTI_CLEAR_BONUS: dict[int, float] = {1: 0, 2: 20, 3: 50, 4: 100, 5: 200}
+REWARD_PER_LINE: float = 25.0
+MULTI_CLEAR_BONUS: dict[int, float] = {1: 0, 2: 50, 3: 150, 4: 350, 5: 700}
 
 # ---------------------------------------------------------------------------
 # Monte Carlo
@@ -21,10 +21,10 @@ GAMMA: float = 0.99
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
-NUM_SIMULATIONS: int = 500
+NUM_SIMULATIONS: int = 250
 MAX_SIMULATIONS: int = 3000       # cap on total episodes kept; oldest are deleted when exceeded
 MAX_STEPS_PER_EPISODE: int = 6000 # hard cap per episode to prevent infinite games
-SIM_EPSILON: float = 0.05          # exploration rate during simulation
+SIM_EPSILON: float = 0.0           # exploration rate during simulation (0 = pure greedy; ε-greedy uniform moves insta-kill late-game boards)
 SIM_WORKERS: int = 16              # >1 uses multiprocessing
 SIMULATIONS_DIR: str = "simulations"
 SIM_SEED: int = 42
@@ -44,16 +44,36 @@ EVAL_INTERVAL: int = 3            # every Nth round, sim runs the CHECKPOINT (ch
 # Applied at the dataset level (training targets only); env rewards are unchanged
 # so reported scores remain the real game score.
 # ---------------------------------------------------------------------------
+# Reference magnitudes for comparison (8x8 board):
+#   - 1-line clear reward  ≈ 15   (REWARD_PER_LINE + cells_placed)
+#   - 2-line clear reward  ≈ 45
+#   - 3-line clear reward  ≈ 85
+# Each coefficient below is multiplied by an unscaled per-board quantity whose
+# min..max range is annotated; the "Phi range" column is what actually shows up
+# in the training target.  If any line's Phi range dwarfs the line-clear
+# rewards above, that term will dominate the regression and the agent will
+# optimise for it instead of for actually clearing lines.
+
+# Raw term:  Σ row_fill² + Σ col_fill²              (0 .. 1024)
+# Useful coef range: 0.0 .. 0.10  (0=off, 0.05=mild, 0.10=strong, >0.10 dominates)
 POTENTIAL_COEFF: float = 0.05
-TRANSITIONS_COEFF: float = 0.2   # penalty on total row+col transitions (subtracted from Phi)
-FITTABILITY_COEFF: float = 0.02  # weight on Σ |p| * num_legal_placements(p, board)
+
+# Raw term:  total row+col transitions               (0 .. 112)
+# Useful coef range: 0.0 .. 0.30  (0=off, 0.10=mild, 0.30=strong, >0.30 dominates)
+TRANSITIONS_COEFF: float = 0.05
+
+# Raw term:  Σ_{p ∈ PIECES} |p| · num_legal_placements(p, board)   (0 .. ~6828)
+# Useful coef range: 0.0 .. 0.015 (0=off, 0.005=mild, 0.015=strong, >0.02 dominates)
+# Current value 0.08 is ~5× past "dominates" — almost certainly why the agent
+# optimises for "keep the board empty" instead of for line clears.
+FITTABILITY_COEFF: float = 0.005
 
 # ---------------------------------------------------------------------------
 # Policy lookahead
 # ---------------------------------------------------------------------------
 LOOKAHEAD_DEPTH: int = 3          # pieces to look ahead (= full queue); set to 1 for 1-step greedy
-LOOKAHEAD_MAX_BATCH: int = 4096   # max states per net forward pass (bounds GPU memory)
-BEAM_WIDTH: int = 10               # beams kept per depth during lookahead (larger = more exhaustive)
+LOOKAHEAD_MAX_BATCH: int = 4096  # max states per net forward pass (bounds GPU memory)
+BEAM_WIDTH: int = 7              # beams kept per depth during lookahead (larger = more exhaustive)
 
 
 # ---------------------------------------------------------------------------
