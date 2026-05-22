@@ -103,7 +103,7 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
 GLOW_AREA_RATIO      = 1.5   # motion-mask area / piece silhouette area.
                              # Above this = much more is lit up than just
                              # the piece → likely a row-clear glow.
-GLOW_HOLD_S          = 0.3   # sustained duration above the ratio before
+GLOW_HOLD_S          = 1.0   # sustained duration above the ratio before
                              # we commit.  Long enough to filter out
                              # transient flashes we didn't intend.
 
