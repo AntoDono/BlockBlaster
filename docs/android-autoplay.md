@@ -65,22 +65,133 @@ in [assist-gui.md](assist-gui.md).
 
 ## Closed-loop visual servo
 
-Auto-play does **not** rely on a pre-baked finger calibration. Each move
-runs a closed-loop visual servo: press the finger on the queue slot,
-then loop {template-match the held piece against the board diff,
-P-step the finger toward the matched centroid} until both the
-centroid error and the match score are inside their tolerances.
-Release when locked; lift in place if the loop budget runs out.
+Auto-play does **not** rely on a pre-baked finger calibration. Each
+move runs a closed-loop visual servo whose detector is
+colour/palette-invariant and whose controller is a PD with a
+distance-adaptive step ceiling.
 
-The detector is one `cv2.matchTemplate` pass per frame against the
-diff of the current `_board_filled_mask` and a pre-grab snapshot of
-that same mask. No tracker state, no learning — every frame is a
-fresh global search. Every tunable lives at the top of
-[`blockblaster/control/servo.py`](../blockblaster/control/servo.py).
+### Detection (frame-diff + template match)
 
-Code layout:
+The grayscale board crop is snapshotted just before DOWN as a
+baseline; per frame we compute `cv2.absdiff(current, baseline)`,
+threshold, morph-close → a binary "this pixel moved" mask. The held
+piece is the only thing in motion on the board, so its rendered
+footprint is exactly what lights up — regardless of colour,
+translucency, or ghost-preview noise. `cv2.matchTemplate` of the
+known piece silhouette against that mask gives the rigid initial
+pose. No tracker state between frames; every frame is a fresh global
+search.
 
-- [`blockblaster/control/servo.py`](../blockblaster/control/servo.py) — the entire servo, one file: constants, `_board_filled_mask`, `_make_template`, `_locate_piece`, and the public `place(...) -> bool`.
+### Per-frame measurement: 5 anchors
+
+Instead of one centroid we sample 5 anchors per frame:
+
+- **TL / TR / BL / BR** — the extreme moving pixel in each corner
+  direction of the corresponding extreme cell of the piece silhouette
+  (e.g. for TL: topmost-leftmost moving pixel in the top-row leftmost
+  cell). Anchored to the silhouette's crisp edges, robust to interior
+  mass distribution.
+- **C** — centre-of-mass of motion in the most-central cell of the
+  silhouette (elbow of an L, middle cell of a line). Robust to
+  corner-cell occlusions that would bias corner anchors.
+
+Anchors whose cell coverage falls below `_CELL_MIN_COVERAGE` are
+dropped. The controller's error is the mean of `(target − measured)`
+over the visible anchors, so partial occlusions (board edges, score
+popups) don't bias the average.
+
+### Gesture
+
+1. **DOWN** on the queue slot (nudged up by `GRAB_Y_NUDGE_PX`), held
+   `HOLD_MS` so Block Blast registers the long-press grab.
+2. **Pre-lift** diagonally to `(board_centre_x, slot_y − INITIAL_LIFT_PX)`
+   — centring x prevents wide pieces grabbed from edge queue slots
+   from hanging off the board where the matcher can't see them.
+3. **Confirm**: wait up to `PRELIFT_CONFIRM_S` for the matcher to
+   return a confident detection. Abort if it never confirms — better
+   than blindly steering a piece we can't see.
+4. **PD loop** until lock or budget elapses.
+5. `PRE_LIFT_MS` settle, then **UP**.
+
+### PD controller + adaptive step cap
+
+`P = err / GAIN`, `D = DERIV_GAIN * derr / GAIN`. If D flips the sign
+of P, it's nulled — the piece coasts one frame instead of overshooting
+near zero error.
+
+The per-iter step ceiling is distance-adaptive:
+
+```
+|err| ≥ FAR_ERR_PX   → cap = MAX_STEP_FAR_PX   (cover ground fast)
+|err| ≤ NEAR_ERR_PX  → cap = MAX_STEP_NEAR_PX  (fine alignment)
+in between           → linearly interpolated
+```
+
+Per-axis, so a piece aligned on x but far on y still gets a fast y
+step without throwing x off. `MAX_STEP_FAR_PX` is bounded by Block
+Blast's drag-follower lag: too fast and the next frame reads a stale
+position and the PD overshoots. Each PD step is interpolated into
+`MOVE_SUBSTEPS` touch events `MOVE_SUBSTEP_MS` apart so the in-game
+drag follower renders continuously.
+
+### Release criteria
+
+UP commits the placement, so the gate is conservative:
+
+```
+(tight_lock OR transit_lock)
+    AND score ≥ LOCK_SCORE_MIN          # match is real, not a phantom
+    AND paired ≥ LOCK_MIN_ANCHORS       # enough anchors to trust error
+
+tight_lock:   |err_x| ≤ LOCK_TOL_PX AND |err_y| ≤ LOCK_TOL_PX
+transit_lock: each axis was inside LOCK_TOL_PX at some point this run
+              AND is still within 2× tol now (catches diagonal
+              pass-through where axes peak on different frames).
+```
+
+`LOCK_MIN_ANCHORS` (default 2) lets edge placements release when some
+corner anchors are off-board — the mean-of-visible error is still
+accurate from as few as 2 anchors.
+
+If the matcher loses the piece for `MAX_NO_PIECE_FRAMES` consecutive
+iters, abort. If `MAX_LOOP_S` elapses without lock, lift in place
+(don't drag back to the queue).
+
+### Pre-clear glow early release
+
+When the held piece is hovering over a position that would complete a
+row or column, Block Blast pre-renders a glow over the cells that
+would clear. That glow paints the motion-diff mask far beyond the
+piece's own footprint and can fool the template matcher into reporting
+a stale position — the controller then sees a phantom error and
+chases pixels that aren't really the piece. (Symptom: the reconstructed
+scene shows the just-placed piece "stuck" up in the board while
+visually it has already dropped into the bottom row.)
+
+The piece is, by definition, on an optimal placement when the glow
+appears, so we just release. The check sits before the matcher-driven
+PD logic so it works even when the glow has already confused the
+matcher:
+
+```
+mask_area_px = nonzero(motion_mask)
+piece_area_px = len(piece.cells) * cell_h * cell_w
+if mask_area_px > GLOW_AREA_RATIO * piece_area_px:
+    sustained for ≥ GLOW_HOLD_S?  → session.up(), return True
+else:
+    reset the glow timer
+```
+
+The `GLOW_HOLD_S` persistence guard (default 1.0 s) is what stops a
+one-frame flash — score popup, brief animation, etc. — from
+accidentally committing a placement we didn't intend.
+
+All tunables live in [`blockblaster/config/params.py`](../blockblaster/config/params.py).
+
+### Code layout
+
+- [`blockblaster/control/servo.py`](../blockblaster/control/servo.py) — the entire servo: `_motion_mask`, `_make_template`, `_piece_anchors`, `_locate_piece`, the PD loop, and the public `place(...) -> bool`.
+- [`blockblaster/config/params.py`](../blockblaster/config/params.py) — every servo and autoplay tunable in one file, grouped by subsystem with rationale comments.
 - [`blockblaster/control/scrcpy_control.py`](../blockblaster/control/scrcpy_control.py) — host-side scrcpy server lifecycle + INJECT_TOUCH_EVENT packet plumbing (see next section).
 - [`scan_board`](../blockblaster/assist/scanner.py) — board state from one frame, used by the recon panel.
 
@@ -204,7 +315,10 @@ On a successful run you should see:
 ```
 [scrcpy] v1.20 control ready (device='SM-G960U', screen=1080x2220)
 [auto] 2x2 slot=2 → row=4 col=4  servo (541, 1626) → (533, 1027)  …
-[auto] servo: OK (3 iters)
+[servo] pre-lift confirmed (score=0.92, anchors=5/5)
+[servo 1] err=(+12,-48) derr=(+0,+0) score=0.94 anchors=5/5 step=(+8,-32) finger=(549, 1594)
+[servo 4] LOCK[TIGHT] err=(-3,+2) best=(3,1) score=0.98 anchors=5/5
+[auto] servo: ok
 ```
 
 If startup fails, captured server logs are printed under `[scrcpy] …` lines

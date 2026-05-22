@@ -39,7 +39,7 @@ MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
 GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
                              # finger-px; smaller = larger steps for the
                              # same error, faster but more overshoot-prone.
-DERIV_GAIN           = 2.1  # D term.  Damps overshoot by anticipating
+DERIV_GAIN           = 2.2   # D term.  Damps overshoot by anticipating
                              # the piece's motion: when the error is
                              # shrinking (piece is already heading toward
                              # the target), the next step is reduced by
@@ -72,9 +72,16 @@ MOVE_SUBSTEP_MS      = 2
 # ── SERVO: lock criteria ────────────────────────────────────────────────
 LOCK_TOL_PX          = 6    # |err| px tolerance on both axes.
 LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
+LOCK_MIN_ANCHORS     = 2     # minimum visible anchors (out of 5) the
+                             # release will accept.  Was "all 5" before,
+                             # but edge placements (corner cells off the
+                             # board, occluded by score popups, etc.)
+                             # routinely show only 2-3 anchors even when
+                             # the piece is dead on target → servo
+                             # burned the whole budget at zero error.
 
 # ── SERVO: detection (frame-diff + template match) ──────────────────────
-MATCH_SCORE_MIN      = 0.3  # below this, treat the frame as "no piece";
+MATCH_SCORE_MIN      = 0.5  # below this, treat the frame as "no piece";
                              # increment the no_piece counter.
 DIFF_THRESHOLD       = 25    # per-pixel grayscale abs-diff threshold for
                              # "this pixel moved since the baseline".
@@ -82,6 +89,23 @@ MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
                              # piece body where the rendered colour happens
                              # to match the baseline, so the template
                              # correlates against a solid blob.
+
+# ── SERVO: pre-clear glow early release ─────────────────────────────────
+# When the held piece is hovering over a placement that would complete a
+# row/column, Block Blast renders a glow preview over the cells that
+# would clear.  That glow lights up the motion-diff mask far beyond the
+# piece's own footprint and confuses the template matcher (suddenly
+# "the piece" looks like a whole row).  The piece is also, by definition,
+# already at an optimal placement when the glow appears — so we just
+# release.  Persistence guard avoids reacting to single-frame flashes
+# (score popups, transient animations) that aren't actual row-clear
+# previews.
+GLOW_AREA_RATIO      = 1.5   # motion-mask area / piece silhouette area.
+                             # Above this = much more is lit up than just
+                             # the piece → likely a row-clear glow.
+GLOW_HOLD_S          = 1.0   # sustained duration above the ratio before
+                             # we commit.  Long enough to filter out
+                             # transient flashes we didn't intend.
 
 
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
