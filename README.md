@@ -107,6 +107,8 @@ The README is just the index. Each doc cross-references the others, so any one o
 | [`docs/game-rules.md`](docs/game-rules.md) | Board / queue / scoring rules and the 42-piece enumeration. |
 | [`docs/architecture.md`](docs/architecture.md) | Top-level folder layout and per-subpackage maps. |
 | [`docs/algorithm.md`](docs/algorithm.md) | State encoding, value network, Monte Carlo pipeline with beam-search lookahead, potential-based reward shaping, D4 augmentation, champion / challenger checkpointing. |
+| [`docs/policy.md`](docs/policy.md) | How `select_action` works: 3-piece beam search, full-return scoring (`Σ γ^k r_k + γ^K V*(leaf)`), distinct-orderings handling, dead-end semantics, future improvements. |
+| [`docs/sim-configs.md`](docs/sim-configs.md) | Named `default` vs `quality` simulation presets — which params to flip for fast-iteration vs trustworthy data, and why. |
 | [`docs/hyperparameters.md`](docs/hyperparameters.md) | Every knob in [`param.py`](param.py) with its default and meaning. |
 | [`docs/training.md`](docs/training.md) | `simulate` → `train` → repeat loop, generated files, how to watch the trained agent play. |
 | [`docs/assist-gui.md`](docs/assist-gui.md) | Side-by-side viewer, calibration flow, key bindings, the synthetic-data piece classifier. |

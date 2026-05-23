@@ -18,6 +18,7 @@ def run_episode(
     checkpoint_epoch: int = 0,
     max_steps: int | None = None,
     device: str | None = None,
+    temperature: float = 0.0,
 ) -> dict:
     """
     Play one episode to completion (or until max_steps is reached).
@@ -32,7 +33,9 @@ def run_episode(
         board_snapshot = env.board.to_list()
         queue_ids = [p.piece_id for p in env.queue]
 
-        action = select_action(env, net, epsilon=epsilon, device=device)
+        action = select_action(
+            env, net, epsilon=epsilon, device=device, temperature=temperature
+        )
         slot, row, col = action
         result = env.step(slot, row, col)
 

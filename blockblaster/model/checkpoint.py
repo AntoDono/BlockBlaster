@@ -1,8 +1,10 @@
 """Save and load ValueNet checkpoints.
 
-Checkpoints may optionally persist Adam optimizer state (momentum / variance
-estimates) across `train()` calls so we don't throw away learned curvature
-information every round of the simulate -> train loop.
+Only weights + a small bit of metadata are persisted.  Adam optimizer state
+is deliberately NOT saved across rounds: long-lived Adam moments stagnate
+the effective per-parameter learning rate, which (combined with weight
+decay) was empirically holding training in a tight basin and preventing
+self-improvement past one promotion.
 """
 
 from __future__ import annotations
@@ -23,7 +25,12 @@ def save(
     path: str | None = None,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> None:
-    """Save a checkpoint, optionally including optimizer state."""
+    """Save a checkpoint.
+
+    `optimizer` is accepted for backward-compatible call sites but its state
+    is intentionally discarded — see the module docstring.
+    """
+    del optimizer  # intentionally unused
     ckpt_path = Path(path or param.CHECKPOINT_PATH)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict = {
@@ -31,8 +38,6 @@ def save(
         "epoch": epoch,
         "best_test_loss": best_test_loss,
     }
-    if optimizer is not None:
-        payload["optimizer_state"] = optimizer.state_dict()
     torch.save(payload, ckpt_path)
 
 
