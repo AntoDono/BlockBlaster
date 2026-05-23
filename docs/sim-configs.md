@@ -68,7 +68,12 @@ If `quality` isn't enough and you still want more from the param surface alone:
 
 Listed here so you know where the remaining wins are:
 
-1. Add immediate line-clear rewards into beam scoring (currently the lookahead scores only the value of the post-3-piece board, ignoring rewards earned *during* the 3 placements — biggest single win).
-2. Replace ε-greedy with temperature-softmax over the top-N final actions (diversity without suicide moves).
-3. Dihedral-average the value at inference (8 symmetries, free variance reduction since the net is already trained with `USE_DIHEDRAL_AUG=True`).
-4. MC truncated rollouts at beam leaves, or full MCTS/PUCT with V as the leaf evaluator.
+1. Dihedral-average the value at inference (8 symmetries, free variance reduction since the net is already trained with `USE_DIHEDRAL_AUG=True`).
+2. Truncated rollouts at beam leaves, or full MCTS/PUCT with V as the leaf evaluator (AlphaZero-flavoured policy iteration; also unlocks a policy head for sharper training signal than the single greedy action).
+
+The following items were previously listed here and are now implemented:
+
+- Immediate line-clear rewards in beam scoring (see [`policy.md`](policy.md) — beam scores full discounted returns `r_0 + γ r_1 + γ² r_2 + γ³ V*(s_3)`, not just `V*(s_3)`).
+- Temperature-softmax over the top-N final beam leaves (see `SIM_TEMPERATURE` / `SIM_EXPLORE_TOP_M`).
+- n-step TD targets with target network (see [`algorithm.md`](algorithm.md) — replaces pure MC; unblocks self-improvement past the buffer's policy ceiling).
+- Paired multi-seed promotion gate (see [`algorithm.md`](algorithm.md) — `EVAL_SEEDS`, `PROMOTION_SEED_WIN_FRACTION`, `PROMOTION_MEDIAN_MARGIN`; replaces the noisy single-seed median rule).

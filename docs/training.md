@@ -2,8 +2,9 @@
 
 [← back to README](../README.md)
 
-For the algorithm side (state encoding, MC returns, reward shaping,
-champion/challenger) see [algorithm.md](algorithm.md). For knobs see
+For the algorithm side (state encoding, n-step TD targets, target network,
+reward shaping, paired champion/challenger evaluation) see
+[algorithm.md](algorithm.md). For knobs see
 [hyperparameters.md](hyperparameters.md).
 
 ## Install
@@ -27,9 +28,14 @@ checkpoint exists yet, a **random** policy is used.
 uv run train.py
 ```
 
-Loads all episodes in `simulations/`, computes MC returns, trains `v(s)`, and
-saves the best checkpoint to `checkpoints/value_net.pt`. Prints
-hyperparameters and per-epoch train/test loss.
+Loads all episodes in `simulations/`, builds per-step n-step TD samples
+(`s_t`, `s_{t+n}`, partial reward sums), trains `v(s)` against targets
+bootstrapped off a periodically-refreshed target network, and saves the best
+checkpoint to `checkpoints/value_net.pt`. Prints hyperparameters and
+per-epoch train/test loss. See
+[algorithm.md → n-step TD training pipeline](algorithm.md#n-step-td-training-pipeline)
+for the target math and `TD_N_STEP` / `TARGET_REFRESH_BATCHES` in
+[hyperparameters.md](hyperparameters.md) for the relevant knobs.
 
 ## Step 3 — Repeat (optional, improves quality)
 
@@ -40,8 +46,8 @@ uv run train.py      # fit again on the expanded dataset
 ```
 
 This is the simulate → train loop described in
-[algorithm.md → Monte Carlo training pipeline](algorithm.md#monte-carlo-training-pipeline);
-champion/challenger evaluation is described in
+[algorithm.md → n-step TD training pipeline](algorithm.md#n-step-td-training-pipeline);
+paired multi-seed champion/challenger evaluation is described in
 [algorithm.md → Champion / challenger checkpointing](algorithm.md#champion--challenger-checkpointing).
 
 ## Step 4 — Watch the agent play

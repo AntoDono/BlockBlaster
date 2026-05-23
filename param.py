@@ -24,11 +24,27 @@ GAMMA: float = 0.99
 NUM_SIMULATIONS: int = 250
 MAX_SIMULATIONS: int = 3000       # cap on total episodes kept; oldest are deleted when exceeded
 MAX_STEPS_PER_EPISODE: int = 6000 # hard cap per episode to prevent infinite games
-SIM_EPSILON: float = 0.0           # exploration rate during simulation (0 = pure greedy; ε-greedy uniform moves insta-kill late-game boards)
+SIM_EPSILON: float = 0.0           # ε-greedy uniform exploration; superseded by SIM_TEMPERATURE for net-driven exploration. Kept for the random-policy fallback when no checkpoint exists.
+# Boltzmann sampling over the top-M final beam leaves during DATA-COLLECTION
+# rounds.  τ=0.0 reproduces deterministic argmax (eval rounds always pass 0.0).
+# τ is in score units (board reward scale); 0.3 is mild — top-M candidates
+# typically span 1-20 score points so τ=0.3 gives meaningful but soft sampling.
+SIM_TEMPERATURE: float = 0.15
+SIM_EXPLORE_TOP_M: int = 5         # cap on # of top final-leaf candidates eligible for softmax sampling; restricts exploration to moves the search already rated highly.
 SIM_WORKERS: int = 16              # >1 uses multiprocessing
 SIMULATIONS_DIR: str = "simulations"
 SIM_SEED: int = 42
 EVAL_INTERVAL: int = 3            # every Nth round, sim runs the CHECKPOINT (challenger) instead of BEST (champion); challenger promoted to BEST iff its median beats the current best.
+
+# ── Paired multi-seed evaluation (promotion gate) ───────────────────────────
+# Eval rounds run BOTH champion and challenger on the same set of base seeds,
+# splitting NUM_SIMULATIONS evenly across them.  Per-seed medians are compared
+# pairwise so piece-stream luck cancels.  Promotion requires:
+#   - challenger beats champion's per-seed median on ≥ PROMOTION_SEED_WIN_FRACTION of seeds, AND
+#   - challenger's overall median exceeds champion's by ≥ PROMOTION_MEDIAN_MARGIN (fractional, e.g. 0.02 = 2%).
+EVAL_SEEDS: list[int] = [42, 43, 44, 45, 46]
+PROMOTION_SEED_WIN_FRACTION: float = 0.6
+PROMOTION_MEDIAN_MARGIN: float = 0.02
 
 # ---------------------------------------------------------------------------
 # Reward shaping (potential-based: F = gamma*Phi(s') - Phi(s))
@@ -80,6 +96,18 @@ BEAM_WIDTH: int = 7              # beams kept per depth during lookahead (larger
 # Augmentation
 # ---------------------------------------------------------------------------
 USE_DIHEDRAL_AUG: bool = True     # 8x augmentation via rotations + reflections
+
+# ---------------------------------------------------------------------------
+# Target (n-step TD + target network)
+# ---------------------------------------------------------------------------
+# Training target: target(s_t) = Σ_{k<n} γ^k r_{t+k}  +  γ^n V_target(s_{t+n})
+# when the episode lasts ≥ n more steps; otherwise a pure MC return.  V_target
+# is a frozen copy of the net refreshed every TARGET_REFRESH_BATCHES batches,
+# so targets actually shift during training (unlike pure MC, which freezes
+# once the net has fit the buffer's policy).  Set TD_N_STEP very large to
+# fall back to full-episode MC behaviour while keeping the new pipeline.
+TD_N_STEP: int = 5
+TARGET_REFRESH_BATCHES: int = 5000
 
 # ---------------------------------------------------------------------------
 # Training

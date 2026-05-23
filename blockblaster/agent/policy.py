@@ -40,6 +40,7 @@ and `blockblaster/train/dataset.py`.
 
 from __future__ import annotations
 
+import math
 import random
 from itertools import permutations
 from typing import Optional
@@ -169,11 +170,58 @@ def _terminal_score(accum_reward: float) -> float:
     return accum_reward
 
 
+def _sample_action(
+    candidates: list[tuple[tuple[int, int, int], float]],
+    temperature: float,
+    top_m: int,
+) -> tuple[int, int, int]:
+    """Pick an action from `(first_action, score)` candidates.
+
+    - `temperature == 0.0`: argmax (deterministic, eval-safe).
+    - `temperature > 0`: dedupe by first_action keeping its best score, take
+      the top-M, then sample one with probability softmax(score / τ).
+
+    The dedupe matters because the same `first_action` can appear in many
+    candidates (different queue orderings, different downstream placements);
+    we want each distinct *first move* to compete on its best continuation.
+    """
+    if not candidates:
+        raise RuntimeError("_sample_action called with no candidates")
+
+    if temperature <= 0.0:
+        best_action, _ = max(candidates, key=lambda x: x[1])
+        return best_action
+
+    best_by_action: dict[tuple[int, int, int], float] = {}
+    for action, score in candidates:
+        if action not in best_by_action or score > best_by_action[action]:
+            best_by_action[action] = score
+
+    ranked = sorted(best_by_action.items(), key=lambda kv: kv[1], reverse=True)
+    pool = ranked[: max(1, top_m)]
+    if len(pool) == 1:
+        return pool[0][0]
+
+    scores = [s for _, s in pool]
+    s_max = max(scores)
+    weights = [math.exp((s - s_max) / temperature) for s in scores]
+    total = sum(weights)
+    r = random.random() * total
+    acc = 0.0
+    for (action, _), w in zip(pool, weights):
+        acc += w
+        if r <= acc:
+            return action
+    return pool[-1][0]
+
+
 def select_action(
     env: BlockBlastEnv,
     net: Optional[ValueNet],
     epsilon: float = 0.0,
     device: str | None = None,
+    temperature: float = 0.0,
+    top_m: int | None = None,
 ) -> tuple[int, int, int]:
     """Choose a (slot, row, col) action via beam-search 3-piece lookahead.
 
@@ -184,6 +232,11 @@ def select_action(
         At each of the 3 depths, candidates are scored as V*(board, remaining)
         and only the top BEAM_WIDTH are expanded at the next depth.
         Dead-end beams (no legal position for the next piece) score V=0.
+      - Final selection: if `temperature == 0` (default), pick the argmax over
+        all leaf candidates (deterministic; eval-safe).  If `temperature > 0`,
+        dedupe leaf candidates by first_action and sample one of the top-`top_m`
+        with probability proportional to `exp(score / temperature)` — used
+        during data-collection rounds to inject state diversity into the buffer.
     """
     actions = env.legal_actions()
     if not actions:
@@ -191,6 +244,9 @@ def select_action(
 
     if net is None or random.random() < epsilon:
         return random.choice(actions)
+
+    if top_m is None:
+        top_m = param.SIM_EXPLORE_TOP_M
 
     net_device = next(net.parameters()).device
     queue = env.queue
@@ -240,8 +296,11 @@ def select_action(
     ]
     beams: list[_BeamEntry] = _top_k(d1_cands, d1_scores, width)
 
-    best_score: float = -float("inf")
-    best_action: tuple[int, int, int] = actions[0]
+    # Collect ALL leaf-score candidates across depths.  Each entry is
+    # (first_action, score); the same first_action can appear multiple times
+    # (e.g. via different queue orderings or downstream placements) and the
+    # sampler dedupes by keeping each first_action's best score.
+    leaf_candidates: list[tuple[tuple[int, int, int], float]] = []
 
     # ------------------------------------------------------------------
     # Depth 1 -> 2: expand the second piece on surviving beams.
@@ -251,19 +310,13 @@ def select_action(
         if not remaining:
             # Queue had only 1 piece — this beam is already a leaf at depth 1.
             vstar = _batch_score([g1], [[]], net, net_device, chunk)[0]
-            score = _leaf_score(accum1, 1, vstar)
-            if score > best_score:
-                best_score = score
-                best_action = first_action
+            leaf_candidates.append((first_action, _leaf_score(accum1, 1, vstar)))
             continue
         p1 = remaining[0]
         positions = _legal_positions(g1, p1)
         if not positions:
             # Dead-end at depth 2: keep accum_reward, no future value.
-            score = _terminal_score(accum1)
-            if score > best_score:
-                best_score = score
-                best_action = first_action
+            leaf_candidates.append((first_action, _terminal_score(accum1)))
             continue
         rem2 = remaining[1:]
         for r, c in positions:
@@ -273,7 +326,7 @@ def select_action(
             d2_cands.append((first_action, new_grid, rem2, accum2, 2))
 
     if not d2_cands:
-        return best_action
+        return _sample_action(leaf_candidates, temperature, top_m)
 
     d2_vstar = _batch_score(
         [c[1] for c in d2_cands],
@@ -286,7 +339,7 @@ def select_action(
     beams = _top_k(d2_cands, d2_scores, width)
 
     # ------------------------------------------------------------------
-    # Depth 2 -> 3 (final): expand the third piece, pick global argmax.
+    # Depth 2 -> 3 (final): expand the third piece, collect all leaves.
     # Each candidate is (first_action, g3, accum3) — empty queue at leaf.
     # ------------------------------------------------------------------
     d3_cands: list[tuple[tuple[int, int, int], np.ndarray, float]] = []
@@ -294,18 +347,12 @@ def select_action(
         if not remaining:
             # Queue had only 2 pieces — leaf at depth 2.
             vstar = _batch_score([g2], [[]], net, net_device, chunk)[0]
-            score = _leaf_score(accum2, 2, vstar)
-            if score > best_score:
-                best_score = score
-                best_action = first_action
+            leaf_candidates.append((first_action, _leaf_score(accum2, 2, vstar)))
             continue
         p2 = remaining[0]
         positions = _legal_positions(g2, p2)
         if not positions:
-            score = _terminal_score(accum2)
-            if score > best_score:
-                best_score = score
-                best_action = first_action
+            leaf_candidates.append((first_action, _terminal_score(accum2)))
             continue
         for r, c in positions:
             new_grid, lines = _place_and_clear(g2, p2, r, c)
@@ -320,9 +367,6 @@ def select_action(
             net, net_device, chunk,
         )
         for (first_action, _, accum3), v in zip(d3_cands, d3_vstar):
-            score = _leaf_score(accum3, 3, v)
-            if score > best_score:
-                best_score = score
-                best_action = first_action
+            leaf_candidates.append((first_action, _leaf_score(accum3, 3, v)))
 
-    return best_action
+    return _sample_action(leaf_candidates, temperature, top_m)

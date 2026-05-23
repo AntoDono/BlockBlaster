@@ -58,14 +58,31 @@ collapse them (e.g. `[L, L, S]` has only 3 distinct orderings).  Each
 distinct ordering seeds its own depth-1 candidates; the global argmax
 across all orderings picks the first action returned.
 
-### ε-exploration
+### Exploration: softmax over final leaves (preferred) and ε-greedy (fallback)
 
-With probability `epsilon` (or unconditionally when `net is None`),
-`select_action` returns a uniform random legal action from
-`env.legal_actions()` instead of running the beam.  For data collection
-this should be 0 — uniform-random placements on a cramped board are
-near-suicide and corrupt the dataset with truncated episodes.  See
-[`sim-configs.md`](sim-configs.md) for the recommended setting.
+There are two exploration mechanisms, used in different situations:
+
+- **Softmax sampling over the beam's top-M final leaves**
+  (`param.SIM_TEMPERATURE`, `param.SIM_EXPLORE_TOP_M`). When `τ > 0` and a
+  net is available, `select_action` collects all final-depth leaf
+  candidates, dedupes by `first_action` (keeping each first move's best
+  continuation), keeps the top-M by score, and samples one with
+  probability `softmax(score / τ)`. This is the recommended exploration
+  knob during **data-collection** rounds: the policy only ever picks moves
+  the search already rated highly, so we get trajectory diversity without
+  ever committing obviously bad moves. `τ = 0` reproduces the deterministic
+  argmax. Eval rounds always pass `τ = 0` so paired champion-vs-challenger
+  comparisons are noise-free.
+
+- **ε-greedy uniform random** (`param.SIM_EPSILON`). With probability
+  `epsilon` (or unconditionally when `net is None`), `select_action`
+  returns a uniform random legal action from `env.legal_actions()` instead
+  of running the beam. Kept primarily for the cold-start / no-checkpoint
+  case; for net-driven exploration, prefer `SIM_TEMPERATURE` — uniform
+  random placements on a cramped board are near-suicide and corrupt the
+  dataset with truncated episodes.
+
+See [`sim-configs.md`](sim-configs.md) for recommended settings.
 
 ## Why score sequences as full returns, not just `V*(leaf)`
 
@@ -132,12 +149,7 @@ From `param.py`:
    Anchors the bootstrap in many real placements instead of a single
    value estimate.  Big late-game improvement, modest code change.
 
-3. **Temperature-softmax over the top-N final actions.**  Replaces
-   ε-greedy uniform exploration with stochastic selection over the
-   beam's top final-action candidates.  Yields diverse trajectories
-   without ever making suicide moves.
-
-4. **MCTS / PUCT** with `V*` as the leaf evaluator and a uniform (or
+3. **MCTS / PUCT** with `V*` as the leaf evaluator and a uniform (or
    learned) policy prior.  AlphaZero-flavoured self-play — highest
    quality, biggest lift.  Also enables storing `π_MCTS` per step as a
    policy-improvement target, which is a much stronger training signal

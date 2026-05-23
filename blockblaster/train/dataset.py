@@ -1,22 +1,31 @@
-"""Load episode JSON files and expose (state_tensor, MC_return) pairs.
+"""Load episode JSON files and expose n-step TD samples for training.
 
-Includes two pieces of data-efficiency machinery:
+Each `__getitem__` returns six items per step `t`:
 
-  - Potential-based reward shaping: the regression target at state s_t is
-    G_t - Phi(s_t), where Phi has three terms: (1) quadratic row/column fill
-    to reward near-complete lines; (2) transition penalty — total filled<->empty
-    flips across all rows and columns, subtracted from Phi so fragmented boards
-    (many interleaved filled/empty cells) are penalised; (3) piece fittability
-    — sum of |p| * num_legal_placements(p, board) over all 32 piece types,
-    directly penalising boards where large pieces are unplaceable.
-    Original optimal policy is preserved iff the policy adds Phi(s') back at
-    action-selection time (see `blockblaster/agent/policy.py`).
+    (s_t, s_next, n_step_reward_sum, phi_t, phi_next, bootstrap_flag)
 
-  - Dihedral (D4) symmetry augmentation: each (state, target) pair is
-    expanded into 8 spatial variants (4 rotations x 2 reflections).  The
-    game's value function is invariant under these transforms because the
-    board has 4-fold rotational + reflection symmetry, so this is "free"
-    training signal.  Enable / disable via `param.USE_DIHEDRAL_AUG`.
+The trainer turns these into a shaped target
+
+    target_F(s_t) = n_step_sum + bootstrap * γ^n * (V_target(s_next) + phi_next) - phi_t
+
+so the net's output keeps its meaning as the *shaped* value V_F = V* - Φ.
+When `bootstrap=0` (episode ended within n steps from t), the term containing
+V_target vanishes and the target reduces to the pure MC return minus φ(s_t).
+
+Why store states by reference (indices into a unique-tensor pool) instead of
+pre-expanding the 8 dihedral variants like the previous MC dataset did:
+
+  - With n-step TD we need s_t AND s_{t+n} per sample.  Pre-expanding 8×
+    would roughly double memory vs. the old dataset.
+  - Within an episode the same encoded state appears many times across
+    consecutive items (state t+n of step t equals state t of step (t+n)),
+    so a unique-tensor pool collapses that duplication for free.
+  - Augmentation is applied lazily in __getitem__ by rotating both s_t and
+    s_{t+n} with the same group element, so a sample's target remains
+    well-defined (V_F is approximately D4-invariant).
+
+Phi (board_potential) is approximately D4-invariant; we cache one phi per
+unique state regardless of the rotation index.
 """
 
 from __future__ import annotations
@@ -35,38 +44,26 @@ from blockblaster.model.encoder import encode_state
 from blockblaster.sim.io import list_episodes, read_episode
 
 
-def _compute_returns(rewards: list[float], gamma: float) -> list[float]:
-    """Compute discounted MC returns G_t = sum_{k>=t} gamma^(k-t) * r_k."""
-    returns: list[float] = [0.0] * len(rewards)
-    g = 0.0
-    for t in reversed(range(len(rewards))):
-        g = rewards[t] + gamma * g
-        returns[t] = g
-    return returns
-
-
-def _dihedral_variants(tensor: torch.Tensor) -> list[torch.Tensor]:
-    """Return the 8 D4 symmetries of a (C, H, W) tensor.
-
-    Applied identically across channels, which corresponds to rotating /
-    reflecting the entire (board + piece-raster) input together.  The value
-    function is invariant under this group, so the target is unchanged.
-    """
-    variants: list[torch.Tensor] = []
-    for k in range(4):
-        rot = torch.rot90(tensor, k, dims=(-2, -1))
-        variants.append(rot.contiguous())
-        variants.append(torch.flip(rot, dims=(-1,)).contiguous())
-    return variants
+# Rotation/reflection index 0..7 in the D4 group.  `rot` is the number of
+# 90-degree rotations; `flip` indicates a final horizontal reflection.
+def _apply_dihedral(tensor: torch.Tensor, idx: int) -> torch.Tensor:
+    """Apply the `idx`-th D4 element to a (C, H, W) tensor."""
+    if idx == 0:
+        return tensor
+    rot = idx // 2
+    flip = idx % 2 == 1
+    out = torch.rot90(tensor, rot, dims=(-2, -1)) if rot else tensor
+    if flip:
+        out = torch.flip(out, dims=(-1,))
+    return out.contiguous()
 
 
 class EpisodeDataset(Dataset):
     """
-    Loads all episodes from `sim_dir`, computes shaped MC returns, and exposes
-    (state_tensor, target) pairs for training.
+    Loads episodes from `sim_dir` and exposes per-step n-step TD samples.
 
-    The train/test split is done at the episode level (seeded) to prevent
-    leakage between correlated successive states within a trajectory.
+    Train/test split is at the episode level (seeded) to prevent leakage
+    between correlated successive states within a trajectory.
     """
 
     def __init__(
@@ -77,6 +74,7 @@ class EpisodeDataset(Dataset):
         split_seed: int | None = None,
         gamma: float | None = None,
         use_aug: bool | None = None,
+        n_step: int | None = None,
     ) -> None:
         directory = sim_dir or param.SIMULATIONS_DIR
         test_frac = test_fraction if test_fraction is not None else param.TEST_SPLIT
@@ -85,6 +83,7 @@ class EpisodeDataset(Dataset):
         # Augmentation only on training data — leaks otherwise and inflates
         # apparent test-set size unhelpfully.
         augment = (use_aug if use_aug is not None else param.USE_DIHEDRAL_AUG) and split == "train"
+        n = n_step if n_step is not None else param.TD_N_STEP
 
         episode_paths = list_episodes(directory)
         if not episode_paths:
@@ -102,30 +101,85 @@ class EpisodeDataset(Dataset):
         else:
             selected = shuffled[n_test:]
 
-        self._items: list[tuple[torch.Tensor, float]] = []
+        # Unique state pool: one entry per (board, queue) appearing in any
+        # episode.  Items reference these by index.  Memory cost is roughly
+        # one tensor per timestep (vs. 8× pre-expansion in the old dataset).
+        self._tensors: list[torch.Tensor] = []
+        self._phis: list[float] = []
+        # Each item:
+        #   (idx_t, idx_next, rot_idx, n_step_reward_sum, bootstrap_flag)
+        # bootstrap_flag is 1.0 when (t + n < T) and the episode didn't
+        # terminate, else 0.0 (in which case idx_next can point anywhere — it
+        # gets masked out — we still need a valid index so we set it to idx_t
+        # for safety in collation).
+        self._items: list[tuple[int, int, int, float, float]] = []
+
+        gamma_powers = [gam ** k for k in range(n + 1)]
+
         for path in selected:
             episode = read_episode(path)
-            rewards = [step["reward"] for step in episode["steps"]]
-            returns = _compute_returns(rewards, gam)
-            for step, ret in zip(episode["steps"], returns):
+            steps = episode["steps"]
+            T = len(steps)
+            if T == 0:
+                continue
+
+            # Encode every step's state once; index = position in pool.
+            base = len(self._tensors)
+            for step in steps:
                 board = Board.from_list(step["board"])
                 queue: list[Piece] = [
                     PIECE_BY_ID[pid] for pid in step["queue"]
                     if pid in PIECE_BY_ID
                 ]
-                tensor = encode_state(board, queue)
-                # Shaped target: G_t - Phi(s_t).  Phi(terminal) := 0 is implicit
-                # because terminal states are not stored in the trajectory.
-                target = ret - board_potential(board.grid)
-                if augment:
-                    for variant in _dihedral_variants(tensor):
-                        self._items.append((variant, target))
+                self._tensors.append(encode_state(board, queue))
+                self._phis.append(board_potential(board.grid))
+
+            rewards = [step["reward"] for step in steps]
+
+            for t in range(T):
+                horizon = min(n, T - t)
+                n_step_sum = 0.0
+                for k in range(horizon):
+                    n_step_sum += gamma_powers[k] * rewards[t + k]
+                # Bootstrap only if (t + n) is still inside the trajectory.
+                # When t + n == T we fall back to the terminal-MC contribution
+                # (V_target term is masked out via bootstrap_flag = 0).
+                if t + n < T:
+                    bootstrap = 1.0
+                    idx_next = base + t + n
                 else:
-                    self._items.append((tensor, target))
+                    bootstrap = 0.0
+                    idx_next = base + t  # placeholder; masked by bootstrap=0
+
+                idx_t = base + t
+                rot_variants = range(8) if augment else (0,)
+                for rot in rot_variants:
+                    self._items.append((idx_t, idx_next, rot, n_step_sum, bootstrap))
+
+        # γ^n is constant per dataset; expose for the trainer.
+        self.gamma_n: float = gamma_powers[n]
+        self.n_step: int = n
 
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        tensor, ret = self._items[idx]
-        return tensor, torch.tensor(ret, dtype=torch.float32)
+    def __getitem__(self, idx: int):
+        idx_t, idx_next, rot, n_step_sum, bootstrap = self._items[idx]
+        s_t = _apply_dihedral(self._tensors[idx_t], rot)
+        # For non-bootstrap items s_next is unused; we still return a tensor
+        # of matching shape (the same rotated s_t) so default_collate works
+        # uniformly and the masked-out V_target contribution is well-defined.
+        if bootstrap > 0.0:
+            s_next = _apply_dihedral(self._tensors[idx_next], rot)
+            phi_next = self._phis[idx_next]
+        else:
+            s_next = s_t
+            phi_next = 0.0
+        return (
+            s_t,
+            s_next,
+            torch.tensor(n_step_sum, dtype=torch.float32),
+            torch.tensor(self._phis[idx_t], dtype=torch.float32),
+            torch.tensor(phi_next, dtype=torch.float32),
+            torch.tensor(bootstrap, dtype=torch.float32),
+        )
