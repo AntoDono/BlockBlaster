@@ -296,6 +296,9 @@ def run(
             (id(state.servo_debug_mask)
              if state.servo_debug_view and state.servo_debug_mask is not None
              else None),
+            (id(state.servo_debug_mask_rolling)
+             if state.servo_debug_view and state.servo_debug_mask_rolling is not None
+             else None),
         )
         if new_recon_key != recon_cache_key or recon_cache_surf is None:
             recon_cache_surf = pygame.Surface(RECON_RECT.size, pygame.SRCALPHA)
@@ -310,6 +313,7 @@ def run(
                 queue_confidences=queue_confidences,
                 detection=state.servo_detection,
                 debug_mask=state.servo_debug_mask,
+                debug_mask_rolling=state.servo_debug_mask_rolling,
                 debug_view=state.servo_debug_view,
             )
             recon_cache_key = new_recon_key

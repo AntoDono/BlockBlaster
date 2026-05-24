@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
+import random
+
+import numpy as np
+import torch
+
 import param
 from blockblaster.gui.app import run
 from blockblaster.model.checkpoint import load_if_exists
@@ -9,6 +15,20 @@ from blockblaster.model.value_net import ValueNet
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the Block Blast agent demo.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed for the env (piece stream) and Python/NumPy/Torch RNGs. "
+             "Default: 0.",
+    )
+    args = parser.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     net = ValueNet().to(param.DEVICE)
     meta = load_if_exists(net)
 
@@ -29,7 +49,7 @@ def main() -> None:
         )
         net.eval()
 
-    run(net)
+    run(net, seed=args.seed)
 
 
 if __name__ == "__main__":

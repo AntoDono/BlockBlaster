@@ -39,6 +39,7 @@ def draw_recon_panel(
     queue_confidences: Optional[list[float]] = None,
     detection: Optional[tuple[int, int, int, int, float]] = None,
     debug_mask: Optional[np.ndarray] = None,
+    debug_mask_rolling: Optional[np.ndarray] = None,
     debug_view: bool = False,
 ) -> None:
     """Draw the right reconstructed game-state panel."""
@@ -55,7 +56,10 @@ def draw_recon_panel(
     board_y         = rect.y + 36 + (rect.height - 36 - board_px) // 2
 
     if debug_view and debug_mask is not None:
-        _draw_motion_mask(screen, debug_mask, board_x, board_y, board_px, small_font)
+        _draw_motion_mask(
+            screen, debug_mask, board_x, board_y, board_px, small_font,
+            rolling_mask=debug_mask_rolling,
+        )
     else:
         draw_board(screen, board, board_x, board_y)
 
@@ -168,18 +172,23 @@ def _draw_motion_mask(
     board_y: int,
     board_px: int,
     small_font: pygame.font.Font,
+    rolling_mask: Optional[np.ndarray] = None,
 ) -> None:
-    """Render the servo's motion mask in place of the recon board.
+    """Render the servo's motion masks in place of the recon board.
 
-    Moved pixels render bright cyan on near-black so the matcher's
-    view is unmistakable.  An 8x8 grid is drawn on top so the cell
-    structure stays legible.
+    Baseline-diff pixels render cyan on near-black: this is what the
+    template matcher actually searches, so it stays the dominant
+    signal.  Rolling-diff (frame-to-frame) pixels overlay in hot
+    magenta on top: these are pixels that *changed since last frame*,
+    so steady-state row-clear glow doesn't paint here even though it
+    still floods the baseline cyan.  Where both fire (the piece is
+    actively moving) the channels saturate to near-white, making the
+    "real" moving region visually unmistakable vs stale glow.
     """
     if mask.ndim != 2 or mask.size == 0:
         return
 
     h, w = mask.shape
-    # Build an RGB image: moved pixels cyan, static near-black.
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
     moved = mask > 0
     rgb[..., 0][moved] = 0
@@ -187,7 +196,17 @@ def _draw_motion_mask(
     rgb[..., 2][moved] = 255
     rgb[~moved] = (16, 18, 28)
 
-    # pygame surfarray expects (w, h, 3) so swap axes.
+    if (rolling_mask is not None and rolling_mask.ndim == 2
+            and rolling_mask.shape == mask.shape):
+        rolling_hot = rolling_mask > 0
+        # Hot magenta saturated to max in R+B, additive on top of cyan.
+        rgb[..., 0][rolling_hot] = 255
+        rgb[..., 2][rolling_hot] = 255
+        # Bump G a touch so cyan+magenta overlap reads as near-white
+        # rather than purple, signalling agreement between the two
+        # signals.  Pure rolling (no cyan) reads as full magenta.
+        rgb[..., 1][rolling_hot] = np.maximum(rgb[..., 1][rolling_hot], 80)
+
     surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
     surf = pygame.transform.smoothscale(surf, (board_px, board_px))
     surface.blit(surf, (board_x, board_y))
@@ -200,9 +219,12 @@ def _draw_motion_mask(
         pygame.draw.line(surface, grid_col, (x, board_y), (x, board_y + board_px), 1)
         pygame.draw.line(surface, grid_col, (board_x, y), (board_x + board_px, y), 1)
 
-    badge = small_font.render(
-        f"motion mask {w}x{h}", True, (200, 230, 240),
+    badge_text = (
+        f"motion + rolling {w}x{h}"
+        if rolling_mask is not None
+        else f"motion mask {w}x{h}"
     )
+    badge = small_font.render(badge_text, True, (200, 230, 240))
     badge_bg = pygame.Surface(
         (badge.get_width() + 8, badge.get_height() + 4), pygame.SRCALPHA,
     )

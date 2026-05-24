@@ -26,10 +26,10 @@ PRELIFT_CONFIRM_S    = 0.25   # after the pre-lift to board centre, wait up
                              # follower catches up.  Abort if exceeded.
 
 # ── SERVO: loop pacing ──────────────────────────────────────────────────
-MAX_LOOP_S           = 8.0   # total servo budget per placement.
+MAX_LOOP_S           = 10.0   # total servo budget per placement.
 SETTLE_MS            = 50    # sleep after each move() so the next frame
                              # samples a settled piece.
-FRAME_TIMEOUT_S      = 0.03  # how long to wait for a fresh frame per iter.
+FRAME_TIMEOUT_S      = 0.25  # how long to wait for a fresh frame per iter.
 MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
                              # before giving up.  Higher = more patience
                              # when the matcher briefly loses the piece
@@ -54,25 +54,29 @@ DERIV_GAIN           = 2.2   # D term.  Damps overshoot by anticipating
 # don't outrun Block Blast's drag follower (it lags fast moves and
 # gives us stale visual feedback on the next frame).
 #
-#   |err| >= FAR_ERR_PX   → clamp to MAX_STEP_FAR_PX  (cover ground)
-#   |err| <= NEAR_ERR_PX  → clamp to MAX_STEP_NEAR_PX (fine alignment)
-#   in between            → linearly interpolated
-MAX_STEP_FAR_PX      = 64    # ceiling when |err| >= FAR_ERR_PX
-MAX_STEP_NEAR_PX     = 12    # ceiling when |err| <= NEAR_ERR_PX
-FAR_ERR_PX           = 150   # error magnitude considered "far"
-NEAR_ERR_PX          = 60    # error magnitude considered "near"
+#   |err| >= FAR_ERR  → clamp to STEP_FAR   (cover ground)
+#   |err| <= NEAR_ERR → clamp to STEP_NEAR  (fine alignment)
+#   in between        → linearly interpolated
+#
+# Expressed as multiples of one board cell so the servo just-works
+# across different phone resolutions / calibration boxes without
+# re-tuning.  Resolved to pixels inside place() once cfg.grid is known.
+STEP_FAR_CELLS       = 1.0   # ceiling when |err| >= FAR_ERR (≈ one cell/iter).
+STEP_NEAR_CELLS      = 0.2   # ceiling when |err| <= NEAR_ERR (≈ a sixth of a cell).
+FAR_ERR_CELLS        = 2.5   # error magnitude considered "far" (≈ 2-3 cells).
+NEAR_ERR_CELLS       = 1.0   # error magnitude considered "near" (≈ one cell).
 
 # Each iteration's step is interpolated into MOVE_SUBSTEPS touch-MOVE
 # events spaced MOVE_SUBSTEP_MS apart, so Android sees a smooth drag
-# instead of a single ~MAX_STEP_PX teleport.  Block Blast renders its
+# instead of a single ~one-cell teleport.  Block Blast renders its
 # drag follower much more reliably on continuous motion.
 MOVE_SUBSTEPS        = 64
 MOVE_SUBSTEP_MS      = 2
 
 # ── SERVO: lock criteria ────────────────────────────────────────────────
-LOCK_TOL_PX          = 6    # |err| px tolerance on both axes.
+LOCK_TOL_PX          = 3    # |err| px tolerance on both axes.
 LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
-LOCK_MIN_ANCHORS     = 2     # minimum visible anchors (out of 5) the
+LOCK_MIN_ANCHORS     = 5     # minimum visible anchors (out of 5) the
                              # release will accept.  Was "all 5" before,
                              # but edge placements (corner cells off the
                              # board, occluded by score popups, etc.)
@@ -84,11 +88,59 @@ LOCK_MIN_ANCHORS     = 2     # minimum visible anchors (out of 5) the
 MATCH_SCORE_MIN      = 0.5  # below this, treat the frame as "no piece";
                              # increment the no_piece counter.
 DIFF_THRESHOLD       = 25    # per-pixel grayscale abs-diff threshold for
-                             # "this pixel moved since the baseline".
-MORPH_KERNEL_PX      = 7     # closing kernel — fills small holes inside the
-                             # piece body where the rendered colour happens
-                             # to match the baseline, so the template
+                             # "this pixel moved" — used by both the
+                             # pre-DOWN baseline mask and the rolling
+                             # frame-to-frame mask.
+MORPH_KERNEL_CELLS   = 0.11  # closing kernel as a fraction of one cell.
+                             # Fills small holes inside the piece body
+                             # where the rendered colour happens to
+                             # match the baseline, so the template
                              # correlates against a solid blob.
+                             # Resolved to an odd px count in servo.
+
+# ── SERVO: rolling-diff translation gate ────────────────────────────────
+# The baseline diff lights up *everything* that differs from the pre-DOWN
+# board — including mid-drag changes like row/column-clear glow previews,
+# score popups, etc.  Once lit they stay lit (baseline never refreshes)
+# and the template matcher can latch onto the wrong blob, freezing the
+# reported piece position while the real piece is somewhere else.
+#
+# A rolling diff (current vs previous frame) is silent on steady-state
+# glow — only pixels that *moved this frame* light up.  We use it as a
+# *gate*, not a matcher: trust the baseline-mask detection only when the
+# rolling mask has enough coverage inside the matched piece footprint.
+# (Shares DIFF_THRESHOLD with the baseline diff — no reason to tune them
+# separately.)
+ROLLING_GATE_MIN_RATIO   = 0.05 # min fraction of the piece footprint
+                                # (cells × cell_h × cell_w) that must
+                                # contain rolling-mask pixels for the
+                                # detection to be trusted.  Low enough
+                                # that a piece whose leading edge alone
+                                # moved this frame still passes; high
+                                # enough that pure glow with a stationary
+                                # piece fails.
+ROLLING_GATE_RELAX_FACTOR = 4.0 # bypass the gate when both axes are
+                                # within (this × LOCK_TOL_PX) of the
+                                # target.  Near lock-in the piece has
+                                # effectively stopped moving frame-to-
+                                # frame; we'd otherwise lose it right
+                                # at the goal.
+
+# ── SERVO: local search window ──────────────────────────────────────────
+# cv2.matchTemplate's global argmax can land on stationary debris (a
+# row/column-clear glow, an already-placed cell that brightened, a score
+# popup) hundreds of pixels from where the piece actually is — and
+# happily report score≈1.0 because the debris happens to be piece-
+# shaped.  Once seeded with a trusted location (from the pre-lift
+# confirmation match), every subsequent matchTemplate is restricted to
+# a window of this half-extent around `last_trusted_tl + commanded_dx,dy`.
+# Phantoms outside the window are unreachable by construction.
+SEARCH_RADIUS_CELLS  = 4.0   # half-extent of the matchTemplate window,
+                             # in cells.  Generously contains where the
+                             # piece could be after one iter even if
+                             # Block Blast's drag follower lagged the
+                             # commanded step, but tiny vs the full
+                             # 8-cell board so faraway debris can't win.
 
 # ── SERVO: pre-clear glow early release ─────────────────────────────────
 # When the held piece is hovering over a placement that would complete a
@@ -111,7 +163,7 @@ GLOW_HOLD_S          = 1.0   # sustained duration above the ratio before
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
 AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
                              # before the assist GUI will dispatch a servo.
-AUTO_POST_PLACE_MS   = 1200   # cooldown after the servo completes.
+AUTO_POST_PLACE_MS   = 1500   # cooldown after the servo completes.
 AUTO_SERVO_BUDGET_MS = 10000  # outer cap on a single servo run, in ms.
 
 # ── AUTOPLAY: headless loop (control/auto_player.py) ────────────────────

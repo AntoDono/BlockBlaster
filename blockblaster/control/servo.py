@@ -57,12 +57,12 @@ zero error.
 
 The per-iter step ceiling is **distance-adaptive**:
 
-  |err| ≥ FAR_ERR_PX   → cap = MAX_STEP_FAR_PX   (cover ground)
-  |err| ≤ NEAR_ERR_PX  → cap = MAX_STEP_NEAR_PX  (fine alignment)
+  |err| ≥ far_err_px   → cap = max_step_far_px   (cover ground)
+  |err| ≤ near_err_px  → cap = max_step_near_px  (fine alignment)
   in between           → linearly interpolated
 
 Per-axis, so a piece aligned on x but far on y still gets a fast y
-step without throwing x off.  ``MAX_STEP_FAR_PX`` is bounded by Block
+step without throwing x off.  ``max_step_far_px`` is bounded by Block
 Blast's drag follower lag — go too fast and the next-frame match
 reads a stale position and the PD overshoots.
 
@@ -124,6 +124,7 @@ from blockblaster.assist.scanner import BOARD_SIZE
 from blockblaster.config.params import (
     DERIV_GAIN,
     DIFF_THRESHOLD,
+    FAR_ERR_CELLS,
     FRAME_TIMEOUT_S,
     GAIN,
     GLOW_AREA_RATIO,
@@ -135,18 +136,20 @@ from blockblaster.config.params import (
     LOCK_SCORE_MIN,
     LOCK_TOL_PX,
     MATCH_SCORE_MIN,
-    FAR_ERR_PX,
     MAX_LOOP_S,
     MAX_NO_PIECE_FRAMES,
-    MAX_STEP_FAR_PX,
-    MAX_STEP_NEAR_PX,
-    MORPH_KERNEL_PX,
+    MORPH_KERNEL_CELLS,
     MOVE_SUBSTEP_MS,
     MOVE_SUBSTEPS,
-    NEAR_ERR_PX,
+    NEAR_ERR_CELLS,
     PRE_LIFT_MS,
     PRELIFT_CONFIRM_S,
+    ROLLING_GATE_MIN_RATIO,
+    ROLLING_GATE_RELAX_FACTOR,
+    SEARCH_RADIUS_CELLS,
     SETTLE_MS,
+    STEP_FAR_CELLS,
+    STEP_NEAR_CELLS,
 )
 from blockblaster.control.coords import slot_center_px
 from blockblaster.control.device import Device
@@ -171,24 +174,29 @@ def _board_gray(frame_bgr: np.ndarray, grid: CalibrationBox) -> np.ndarray:
 
 
 def _motion_mask(
-    current_gray: np.ndarray, baseline_gray: np.ndarray,
+    current_gray: np.ndarray,
+    baseline_gray: np.ndarray,
+    threshold: int = DIFF_THRESHOLD,
+    kernel_px: int = 0,
 ) -> np.ndarray:
     """Binary 'this pixel moved since baseline' mask.
 
     Frame-differencing is colour- and palette-invariant: whatever the
     held piece looks like, the pixels it covers on the board look
-    *different* from what was there a moment ago.  A morph-close fills
-    the small gaps where the piece's rendered colour happens to land
-    near the baseline brightness so the template correlates against a
-    coherent blob, not a hollow outline.
+    *different* from what was there a moment ago.  When ``kernel_px``
+    is supplied, a morph-close of that size fills the small gaps where
+    the piece's rendered colour happens to land near the baseline
+    brightness so the template correlates against a coherent blob, not
+    a hollow outline.  Kernel size is cell-relative; the caller
+    derives it from the calibrated grid.
     """
     if current_gray.shape != baseline_gray.shape:
         return np.zeros_like(current_gray)
     diff = cv2.absdiff(current_gray, baseline_gray)
-    _, mask = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
-    if MORPH_KERNEL_PX > 1:
+    _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+    if kernel_px > 1:
         kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (MORPH_KERNEL_PX, MORPH_KERNEL_PX),
+            cv2.MORPH_ELLIPSE, (kernel_px, kernel_px),
         )
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
@@ -266,20 +274,37 @@ def _locate_piece(
     grid: CalibrationBox,
     piece: Piece,
     baseline_gray: np.ndarray,
+    prev_gray: Optional[np.ndarray] = None,
+    expected_tl_xy: Optional[tuple[int, int]] = None,
+    search_radius_px: int = 0,
 ) -> tuple[
     list[AnchorMeasurement], float,
     Optional[tuple[int, int]], np.ndarray,
+    Optional[np.ndarray], np.ndarray,
 ]:
-    """Return ``(anchors_measured, rigid_score, top_left_cell_rc, motion_mask)``.
+    """Return ``(anchors, score, tl_rc, baseline_mask, rolling_mask, cur_gray)``.
 
     Pipeline:
 
     1. ``cv2.absdiff`` against the cached pre-drag baseline → threshold
-       → morph-close = motion mask.
-    2. ``cv2.matchTemplate`` of the piece's binary silhouette to get a
-       rigid initial position.
-    3. For each piece anchor (4 corners + 1 central cell centroid),
-       inspect the corresponding cell's window in the motion mask:
+       → morph-close = baseline motion mask.  This is what drives the
+       template match (palette-invariant 'where is the piece sitting').
+    2. When ``prev_gray`` is provided, also ``cv2.absdiff`` against the
+       previous frame → ``DIFF_THRESHOLD`` → morph-close =
+       rolling motion mask.  Silent on steady-state glow because glow
+       cells stop *changing* once lit; bright wherever the piece
+       physically moved since last frame.  Not used here for matching
+       — the caller uses it as a translation gate on the detection.
+    3. ``cv2.matchTemplate`` of the piece's binary silhouette against
+       the baseline mask to get a rigid initial position.  When
+       ``expected_tl_xy`` + ``search_radius_px`` are supplied, the
+       argmax is restricted to a window of that half-extent around the
+       expected top-left, so faraway debris (glow blobs, score popups,
+       static cells that brightened) is unreachable by construction.
+       Defaults are full-frame, matching the legacy behaviour used by
+       the pre-lift confirmation pass which has no seed yet.
+    4. For each piece anchor (4 corners + 1 central cell centroid),
+       inspect the corresponding cell's window in the baseline mask:
        - Corner anchor: take the extreme moving pixel in that corner's
          direction (TL: topmost-leftmost; BR: bottommost-rightmost; …).
          Anchored to crisp silhouette edges, robust to interior mass.
@@ -291,29 +316,63 @@ def _locate_piece(
        dropped so partial occlusions don't poison the error.
 
     ``anchors_measured`` is empty when the rigid match scores below
-    :data:`MATCH_SCORE_MIN`.  ``motion_mask`` is always returned for
-    the GUI debug view.
+    :data:`MATCH_SCORE_MIN`.  Both masks are always returned (the
+    rolling mask is ``None`` when ``prev_gray`` is ``None``) so the
+    GUI debug view can render them.  ``cur_gray`` is returned so the
+    caller can promote it to ``prev_gray`` for the next iteration.
     """
-    current_gray = _board_gray(frame_bgr, grid)
-    search = _motion_mask(current_gray, baseline_gray)
-
     cell_h = max(1, grid.fh // BOARD_SIZE)
     cell_w = max(1, grid.fw // BOARD_SIZE)
+    # Morph-close kernel sized to a fraction of a cell so it just-works
+    # across phone resolutions.  Forced odd so the structuring element
+    # has a well-defined centre.
+    kernel_px = max(1, int(round(MORPH_KERNEL_CELLS * (cell_w + cell_h) / 2)))
+    if kernel_px % 2 == 0:
+        kernel_px += 1
+
+    current_gray = _board_gray(frame_bgr, grid)
+    search = _motion_mask(current_gray, baseline_gray, kernel_px=kernel_px)
+    rolling: Optional[np.ndarray] = None
+    if prev_gray is not None and prev_gray.shape == current_gray.shape:
+        rolling = _motion_mask(current_gray, prev_gray, kernel_px=kernel_px)
+
     tpl = _make_template(piece, cell_h, cell_w)
 
     if (search.shape[0] < tpl.shape[0]
             or search.shape[1] < tpl.shape[1]):
-        return [], 0.0, None, search
+        return [], 0.0, None, search, rolling, current_gray
 
     result = cv2.matchTemplate(search, tpl, cv2.TM_CCORR_NORMED)
-    _, score, _, top_left = cv2.minMaxLoc(result)
+
+    # Restrict matchTemplate's argmax to a window around the expected
+    # next top-left when the caller provides a seed.  The result tensor
+    # has shape (H - tpl_h + 1, W - tpl_w + 1) in search-image coords,
+    # so we slice it, run minMaxLoc on the slice, and offset the
+    # returned top-left back into full search-image coords.
+    if expected_tl_xy is not None and search_radius_px > 0:
+        ex, ey = int(expected_tl_xy[0]), int(expected_tl_xy[1])
+        r_y0 = max(0, ey - search_radius_px)
+        r_x0 = max(0, ex - search_radius_px)
+        r_y1 = min(result.shape[0], ey + search_radius_px + 1)
+        r_x1 = min(result.shape[1], ex + search_radius_px + 1)
+        if r_y1 <= r_y0 or r_x1 <= r_x0:
+            # Window pushed entirely off the result tensor — treat as
+            # "piece not findable here this frame".  Caller bumps
+            # no_piece and the abort path takes over from there.
+            return [], 0.0, None, search, rolling, current_gray
+        result_win = result[r_y0:r_y1, r_x0:r_x1]
+        _, score, _, top_left_win = cv2.minMaxLoc(result_win)
+        top_left = (top_left_win[0] + r_x0, top_left_win[1] + r_y0)
+    else:
+        _, score, _, top_left = cv2.minMaxLoc(result)
+
     score = float(score)
 
     tl_col = int(round(top_left[0] / cell_w))
     tl_row = int(round(top_left[1] / cell_h))
 
     if score < MATCH_SCORE_MIN:
-        return [], score, (tl_row, tl_col), search
+        return [], score, (tl_row, tl_col), search, rolling, current_gray
 
     # ── Per-anchor refinement ───────────────────────────────────────
     cell_area_px = cell_h * cell_w
@@ -347,7 +406,7 @@ def _locate_piece(
             idx, fx, fy, coverage_px / float(cell_area_px),
         ))
 
-    return anchors_measured, score, (tl_row, tl_col), search
+    return anchors_measured, score, (tl_row, tl_col), search, rolling, current_gray
 
 
 # ── Motion helper ─────────────────────────────────────────────────────────
@@ -404,11 +463,24 @@ def place(
     provided, the latest detection is published on
     ``state.servo_detection`` for live GUI visualization.
     """
-    def _publish(detection, mask=None, measured_cells=None, target_cells=None):
+    # Sentinel lets callers explicitly publish ``None`` for the rolling
+    # mask (e.g. the first iter, when there's no prev frame) without us
+    # interpreting that as "leave the field alone".
+    _unset = object()
+
+    def _publish(
+        detection,
+        mask=None,
+        measured_cells=None,
+        target_cells=None,
+        rolling_mask=_unset,
+    ):
         if state is not None:
             state.servo_detection = detection
             if mask is not None:
                 state.servo_debug_mask = mask
+            if rolling_mask is not _unset:
+                state.servo_debug_mask_rolling = rolling_mask
             if measured_cells is not None:
                 state.servo_measured_cells = measured_cells
             if target_cells is not None:
@@ -437,6 +509,24 @@ def place(
         sy = dev_h / max(1, frame_h)
         def to_dev(p: tuple[int, int]) -> tuple[int, int]:
             return (int(round(p[0] * sx)), int(round(p[1] * sy)))
+
+        # ── Cell-relative px values, derived once per placement ──────
+        # Almost everything in the servo (max step size, error
+        # thresholds, search radius, gate relax zone) is naturally
+        # expressed as a multiple of one board cell.  We resolve them
+        # to pixels here so the loop can use plain integers, and the
+        # ratios in params.py stay phone-independent.
+        cell_w_int = max(1, cfg.grid.fw // BOARD_SIZE)
+        cell_h_int = max(1, cfg.grid.fh // BOARD_SIZE)
+        cell_px    = (cell_w_int + cell_h_int) / 2
+        max_step_far_px       = max(1, int(round(STEP_FAR_CELLS  * cell_px)))
+        max_step_near_px      = max(1, int(round(STEP_NEAR_CELLS * cell_px)))
+        far_err_px            = max(1, int(round(FAR_ERR_CELLS   * cell_px)))
+        near_err_px           = max(1, int(round(NEAR_ERR_CELLS  * cell_px)))
+        search_radius_px      = max(1, int(round(SEARCH_RADIUS_CELLS * cell_px)))
+        rolling_gate_relax_px = max(1, int(round(
+            ROLLING_GATE_RELAX_FACTOR * LOCK_TOL_PX,
+        )))
 
         # ── Targets ───────────────────────────────────────────────────
         # Five target anchors of the piece silhouette in full-frame
@@ -511,16 +601,32 @@ def place(
             _, last_fid = device.get_latest_with_id()
             confirm_deadline = time.monotonic() + PRELIFT_CONFIRM_S
             confirmed = False
+            # Seed prev_gray with the last confirmation frame's gray
+            # crop so the very first PD-loop iter already has a rolling
+            # diff to gate on, rather than wasting an iter as no-prev.
+            prev_gray: Optional[np.ndarray] = None
+            # Pre-lift confirm also seeds the PD loop's local-search
+            # window: by the time we enter the loop we have one trusted
+            # top-left in board-crop pixels.  Without this seed, the
+            # first iter would have to fall back to a full-frame match
+            # — exactly the failure mode the window is meant to avoid.
+            last_trusted_tl_px: Optional[tuple[int, int]] = None
             while time.monotonic() < confirm_deadline:
                 frame, fid = _wait_frame(device, last_fid, FRAME_TIMEOUT_S)
                 if frame is None:
                     continue
                 last_fid = fid
-                anchors_measured, score, _, _ = _locate_piece(
+                anchors_measured, score, tl_rc, _, _, cur_gray = _locate_piece(
                     frame, cfg.grid, suggestion.piece, baseline_gray,
                 )
+                prev_gray = cur_gray
                 if anchors_measured and score >= LOCK_SCORE_MIN:
                     confirmed = True
+                    if tl_rc is not None:
+                        last_trusted_tl_px = (
+                            tl_rc[1] * cell_w_int,
+                            tl_rc[0] * cell_h_int,
+                        )
                     print(
                         f"[servo] pre-lift confirmed "
                         f"(score={score:.2f}, anchors={len(anchors_measured)}/5)"
@@ -539,6 +645,12 @@ def place(
             prev_err_y: Optional[int] = None
             best_err_x = 10**9   # min |err_x| seen this run
             best_err_y = 10**9   # min |err_y| seen this run
+            # Last PD step we issued, in board-crop pixels.  Combined
+            # with `last_trusted_tl_px` it gives the expected next
+            # top-left location, which we centre the local matchTemplate
+            # window on so the matcher can't latch onto faraway debris.
+            last_commanded_dx = 0
+            last_commanded_dy = 0
             # Pre-clear glow tracker: when Block Blast previews a
             # row/column clear, the motion mask balloons way past the
             # piece's silhouette area.  We only commit if that condition
@@ -546,8 +658,6 @@ def place(
             # flash (score popup, etc.) can't trigger an early release.
             glow_start_t: Optional[float] = None
             piece_area_cells = len(suggestion.piece.cells)
-            cell_h_int = max(1, cfg.grid.fh // BOARD_SIZE)
-            cell_w_int = max(1, cfg.grid.fw // BOARD_SIZE)
             piece_area_px = piece_area_cells * cell_h_int * cell_w_int
 
             while time.monotonic() < deadline:
@@ -557,8 +667,29 @@ def place(
                     continue
                 last_fid = fid
 
-                anchors_measured, score, tl_rc, motion = _locate_piece(
-                    frame, cfg.grid, suggestion.piece, baseline_gray,
+                # Centre the matchTemplate window on where we expect
+                # the piece to be this frame: last trusted location
+                # plus the PD step we just commanded.  Defaults to
+                # full-frame when no seed exists (pre-lift seeding
+                # should always provide one, but the fallback keeps
+                # the matcher functional if something goes wrong).
+                if last_trusted_tl_px is not None:
+                    expected_tl = (
+                        last_trusted_tl_px[0] + last_commanded_dx,
+                        last_trusted_tl_px[1] + last_commanded_dy,
+                    )
+                    search_radius = search_radius_px
+                else:
+                    expected_tl = None
+                    search_radius = 0
+
+                anchors_measured, score, tl_rc, motion, rolling, cur_gray = (
+                    _locate_piece(
+                        frame, cfg.grid, suggestion.piece, baseline_gray,
+                        prev_gray=prev_gray,
+                        expected_tl_xy=expected_tl,
+                        search_radius_px=search_radius,
+                    )
                 )
 
                 # ── Pre-clear glow detector ──────────────────────────
@@ -588,7 +719,10 @@ def place(
                     glow_start_t = None
 
                 if not anchors_measured:
-                    _publish(None, mask=motion, measured_cells=[])
+                    _publish(
+                        None, mask=motion, measured_cells=[],
+                        rolling_mask=rolling,
+                    )
                     if state is not None:
                         state.servo_measured_px = None
                     no_piece += 1
@@ -600,8 +734,16 @@ def place(
                         time.sleep(PRE_LIFT_MS / 1000)
                         session.up()
                         return False
+                    prev_gray = cur_gray
                     continue
-                no_piece = 0
+                # NOTE: `no_piece` is *not* reset here.  The matcher
+                # returned anchors, but they still have to clear the
+                # rolling-diff translation gate below before we trust
+                # them.  Resetting too early lets a placement loop
+                # forever oscillating no_piece between 0 and 1 (matcher
+                # finds the same phantom blob every frame, gate kills
+                # it every frame).  The reset moved to right after the
+                # gate passes.
 
                 # ── Per-anchor error: mean of (target_i − measured_i)
                 # over only the anchors the matcher could actually see
@@ -619,11 +761,76 @@ def place(
                     err_sum_y += ty - m[1]
                     paired += 1
                 if paired == 0:
-                    _publish(None, mask=motion, measured_cells=[])
+                    _publish(
+                        None, mask=motion, measured_cells=[],
+                        rolling_mask=rolling,
+                    )
                     no_piece += 1
+                    prev_gray = cur_gray
                     continue
                 err_x = int(err_sum_x / paired)
                 err_y = int(err_sum_y / paired)
+
+                # ── Rolling-diff translation gate ───────────────────
+                # The baseline mask keeps glow blobs lit forever (it
+                # diffs against a frozen pre-DOWN snapshot).  The
+                # rolling mask only lights pixels that *changed this
+                # frame*, so it's silent on steady-state glow but
+                # bright where the piece actually moved.  Require some
+                # rolling-motion coverage inside the matched footprint
+                # — if the matcher latched onto a stationary glow blob
+                # there'll be none, and we drop the frame.
+                #
+                # Relax the gate near lock-in: a correctly placed piece
+                # has effectively stopped moving frame-to-frame, so
+                # rolling coverage drops to zero through no fault of
+                # the detection.  Trust the baseline match there.
+                if (rolling is not None and tl_rc is not None
+                        and max(abs(err_x), abs(err_y)) > rolling_gate_relax_px):
+                    p_rows = suggestion.piece.rows
+                    p_cols = suggestion.piece.cols
+                    cell_h_g = max(1, cfg.grid.fh // BOARD_SIZE)
+                    cell_w_g = max(1, cfg.grid.fw // BOARD_SIZE)
+                    ty = max(0, tl_rc[0] * cell_h_g)
+                    tx = max(0, tl_rc[1] * cell_w_g)
+                    fh_px = p_rows * cell_h_g
+                    fw_px = p_cols * cell_w_g
+                    window = rolling[ty:ty + fh_px, tx:tx + fw_px]
+                    footprint_px = max(1, len(suggestion.piece.cells)
+                                       * cell_h_g * cell_w_g)
+                    cov_px = int(np.count_nonzero(window))
+                    cov = cov_px / float(footprint_px)
+                    if cov < ROLLING_GATE_MIN_RATIO:
+                        _publish(
+                            None, mask=motion, measured_cells=[],
+                            rolling_mask=rolling,
+                        )
+                        if state is not None:
+                            state.servo_measured_px = None
+                        no_piece += 1
+                        print(
+                            f"[servo {iters}] gated by rolling "
+                            f"cov={cov:.2f} (need {ROLLING_GATE_MIN_RATIO:.2f}) "
+                            f"err=({err_x:+d},{err_y:+d}) score={score:.2f}"
+                        )
+                        if no_piece >= MAX_NO_PIECE_FRAMES:
+                            time.sleep(PRE_LIFT_MS / 1000)
+                            session.up()
+                            return False
+                        prev_gray = cur_gray
+                        continue
+
+                # Frame is fully trusted: anchors found AND rolling
+                # gate cleared (or relaxed at lock-in).  Reset the
+                # no_piece counter and update the local-search seed so
+                # the next iter's matchTemplate window centres on where
+                # the piece actually is now.
+                no_piece = 0
+                if tl_rc is not None:
+                    last_trusted_tl_px = (
+                        tl_rc[1] * cell_w_int,
+                        tl_rc[0] * cell_h_int,
+                    )
 
                 # Aggregate "where is the piece" for the headline dot.
                 meas_cx_mean = sum(p[0] for p in measured_anchors_xy) / len(measured_anchors_xy)
@@ -638,6 +845,7 @@ def place(
                         ),
                         mask=motion,
                         measured_cells=[(int(x), int(y)) for x, y in measured_anchors_xy],
+                        rolling_mask=rolling,
                     )
                 if state is not None:
                     state.servo_measured_px = (int(meas_cx_mean), int(meas_cy_mean))
@@ -705,15 +913,15 @@ def place(
                 # aligned on x but far on y still gets a fast y step
                 # without throwing x off.
                 def _step_cap(err_mag: int) -> int:
-                    if err_mag >= FAR_ERR_PX:
-                        return MAX_STEP_FAR_PX
-                    if err_mag <= NEAR_ERR_PX:
-                        return MAX_STEP_NEAR_PX
-                    span = max(1, FAR_ERR_PX - NEAR_ERR_PX)
-                    t = (err_mag - NEAR_ERR_PX) / span
+                    if err_mag >= far_err_px:
+                        return max_step_far_px
+                    if err_mag <= near_err_px:
+                        return max_step_near_px
+                    span = max(1, far_err_px - near_err_px)
+                    t = (err_mag - near_err_px) / span
                     return int(round(
-                        MAX_STEP_NEAR_PX
-                        + t * (MAX_STEP_FAR_PX - MAX_STEP_NEAR_PX)
+                        max_step_near_px
+                        + t * (max_step_far_px - max_step_near_px)
                     ))
                 cap_x = _step_cap(abs(err_x))
                 cap_y = _step_cap(abs(err_y))
@@ -730,6 +938,18 @@ def place(
                 _move_smooth(session, to_dev, finger, next_finger)
                 finger = next_finger
                 time.sleep(SETTLE_MS / 1000)
+                # Record the PD step in board-crop pixels so next iter
+                # can centre its matchTemplate window on
+                # `last_trusted_tl + (dx, dy)`.  Finger px and
+                # board-crop px share a scale (we're not in device-
+                # touch coords here), so the delta is direct.
+                last_commanded_dx = dx
+                last_commanded_dy = dy
+                # Promote the current frame's gray crop to prev for
+                # next iter's rolling diff.  Updated *after* the move
+                # so the next frame's rolling mask captures the motion
+                # we just commanded.
+                prev_gray = cur_gray
 
             # Budget exceeded — lift in place rather than drag back to queue.
             print(f"[servo] budget exceeded after {iters} iters")
@@ -740,6 +960,7 @@ def place(
         if state is not None:
             state.servo_detection = None
             state.servo_debug_mask = None
+            state.servo_debug_mask_rolling = None
             state.servo_target_px = None
             state.servo_measured_px = None
             state.servo_target_cells = []

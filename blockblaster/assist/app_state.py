@@ -72,6 +72,16 @@ class AppState:
     # so the user can eyeball what the matcher sees in real time.
     servo_debug_mask: Optional[np.ndarray] = None
 
+    # Rolling (frame-to-frame) motion mask, same shape as
+    # ``servo_debug_mask``.  Bright only where pixels *changed since
+    # last frame* — silent on steady-state row/clear-glow that pollutes
+    # the baseline mask.  Used by the servo as a translation gate, and
+    # overlaid in magenta on top of the baseline cyan in the debug
+    # view so the user can see which part of the mask is actually
+    # moving vs which is stale glow.  ``None`` on the very first iter
+    # (no prev frame yet) and after the servo finishes.
+    servo_debug_mask_rolling: Optional[np.ndarray] = None
+
     # When True, the recon panel replaces the reconstructed board with
     # the live motion mask scaled to fit.  Detection overlay still
     # renders on top.  Also enables the phone-panel overlay that shows

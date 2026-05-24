@@ -24,7 +24,7 @@ FPS = 30
 STEPS_PER_SECOND = 4        # how many agent moves per second when running
 
 
-def run(net: Optional[ValueNet] = None) -> None:
+def run(net: Optional[ValueNet] = None, seed: int = 0) -> None:
     """
     Launch the pygame window and play Block Blast using `net` (if provided).
     Controls:
@@ -40,7 +40,7 @@ def run(net: Optional[ValueNet] = None) -> None:
     screen, layout = make_window()
     clock = pygame.time.Clock()
 
-    env = BlockBlastEnv(seed=0)
+    env = BlockBlastEnv(seed=seed)
     paused    = False
     game_over = False
 
@@ -62,7 +62,7 @@ def run(net: Optional[ValueNet] = None) -> None:
                     paused = not paused
                     last_step_time = now
                 elif event.key == pygame.K_r:
-                    env.reset()
+                    env.reset(seed=seed)
                     game_over = False
                     paused    = False
                     last_step_time = now
