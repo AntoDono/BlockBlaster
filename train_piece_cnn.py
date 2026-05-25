@@ -31,11 +31,11 @@ from blockblaster.piece_cnn import (
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-NUM_TRAIN_SAMPLES = 100_000     # synth examples for training
-NUM_VAL_SAMPLES   = 10_000      # held-out synth examples for validation
+NUM_TRAIN_SAMPLES = 250_000     # synth examples for training
+NUM_VAL_SAMPLES   = 25_000      # held-out synth examples for validation
 NUM_WORKERS       = max(1, (os.cpu_count() or 4) - 1)  # CPU procs for synth
-BATCH_SIZE        = 512        # large — model is tiny, GPU is bored
-NUM_EPOCHS        = 12
+BATCH_SIZE        = 2048        # large — model is tiny, GPU is bored
+NUM_EPOCHS        = 20
 LEARNING_RATE     = 1e-3
 WEIGHT_DECAY      = 1e-4
 TARGET_VAL_ACC    = 0.995       # stop early if reached
@@ -47,13 +47,21 @@ def _to_tensor(images_bgr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(rgb.transpose(0, 3, 1, 2)))
 
 
-def _eval(net: PieceCNN, x: torch.Tensor, y: torch.Tensor, batch: int) -> float:
+def _eval(
+    net: PieceCNN,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    batch: int,
+    device: torch.device,
+) -> float:
     net.eval()
     correct = 0
     with torch.no_grad():
         for i in range(0, len(x), batch):
-            logits = net(x[i : i + batch])
-            correct += (logits.argmax(dim=1) == y[i : i + batch]).sum().item()
+            xb = x[i : i + batch].to(device, non_blocking=True)
+            yb = y[i : i + batch].to(device, non_blocking=True)
+            logits = net(xb)
+            correct += (logits.argmax(dim=1) == yb).sum().item()
     net.train()
     return correct / len(x)
 
@@ -78,12 +86,16 @@ def main() -> None:
     print(f"[phase 1] dataset ready in {time.time() - t0:.1f}s "
           f"(RAM: {(train_imgs.nbytes + val_imgs.nbytes) / 1e6:.0f} MB)")
 
-    # Move full tensors to device (small enough to fit on any GPU)
-    train_x = _to_tensor(train_imgs).to(device)
-    train_y = torch.from_numpy(train_lbls).to(device)
-    val_x   = _to_tensor(val_imgs).to(device)
-    val_y   = torch.from_numpy(val_lbls).to(device)
-    del train_imgs, val_imgs   # free CPU RAM
+    # Keep the full tensors in pinned CPU RAM and copy each batch to the
+    # GPU on-the-fly. Datasets large enough to exceed GPU memory (e.g.
+    # 250k samples ≈ 26 GiB as float32) train fine this way; the PCIe
+    # copy overlaps with the previous batch's compute via non_blocking=True.
+    pin     = device.type == "cuda"
+    train_x = _to_tensor(train_imgs).pin_memory() if pin else _to_tensor(train_imgs)
+    train_y = torch.from_numpy(train_lbls).pin_memory() if pin else torch.from_numpy(train_lbls)
+    val_x   = _to_tensor(val_imgs).pin_memory() if pin else _to_tensor(val_imgs)
+    val_y   = torch.from_numpy(val_lbls).pin_memory() if pin else torch.from_numpy(val_lbls)
+    del train_imgs, val_imgs   # free the uint8 staging copies
 
     # ── Phase 2: train ───────────────────────────────────────────────────
     print(f"\n[phase 2] training "
@@ -99,7 +111,7 @@ def main() -> None:
     best_acc = 0.0
     train_t0 = time.time()
     for epoch in range(1, NUM_EPOCHS + 1):
-        perm = torch.randperm(n_train, device=device)
+        perm = torch.randperm(n_train)
         batch_starts = list(range(0, n_train, BATCH_SIZE))
 
         epoch_loss = 0.0
@@ -115,8 +127,8 @@ def main() -> None:
         )
         for i in bar:
             idx = perm[i : i + BATCH_SIZE]
-            x = train_x[idx]
-            y = train_y[idx]
+            x = train_x[idx].to(device, non_blocking=True)
+            y = train_y[idx].to(device, non_blocking=True)
 
             logits = net(x)
             loss = F.cross_entropy(logits, y)
@@ -135,7 +147,7 @@ def main() -> None:
             )
 
         train_acc = epoch_correct / n_train
-        val_acc   = _eval(net, val_x, val_y, batch=BATCH_SIZE)
+        val_acc   = _eval(net, val_x, val_y, batch=BATCH_SIZE, device=device)
         ep_time   = time.time() - ep_t0
 
         flag = ""

@@ -81,26 +81,36 @@ def random_background(
     w: int,
     rng: random.Random,
     forced_hsv: Optional[tuple[int, int, int]] = None,
+    sat_range: Optional[tuple[int, int]] = None,
+    val_range: Optional[tuple[int, int]] = None,
+    add_gradient: bool = True,
+    jitter: Optional[int] = None,
 ) -> np.ndarray:
     """Solid background of a randomly-sampled colour, plus per-pixel noise and
     an optional brightness gradient or radial vignette.
 
     Pass ``forced_hsv`` to override the random base colour — used by the
     low-contrast regime to match the background tightly to the piece colour.
+    ``sat_range`` / ``val_range`` override the global BG ranges (used by
+    clean-mode rendering to force a pastel palette).
     """
+    sat_lo, sat_hi = sat_range if sat_range is not None else BG_SAT_RANGE
+    val_lo, val_hi = val_range if val_range is not None else BG_VAL_RANGE
+    j              = BG_JITTER if jitter is None else jitter
     if forced_hsv is not None:
         base_h, base_s, base_v = forced_hsv
     else:
         base_h = rng.randint(*BG_HUE_RANGE)
-        base_s = rng.randint(*BG_SAT_RANGE)
-        base_v = rng.randint(*BG_VAL_RANGE)
+        base_s = rng.randint(sat_lo, sat_hi)
+        base_v = rng.randint(val_lo, val_hi)
     base_bgr = np.array(hsv_to_bgr(base_h, base_s, base_v), dtype=np.int16)
 
-    bg    = np.full((h, w, 3), base_bgr, dtype=np.int16)
-    noise = np.random.randint(-BG_JITTER, BG_JITTER + 1, (h, w, 3), dtype=np.int16)
-    bg   += noise
+    bg = np.full((h, w, 3), base_bgr, dtype=np.int16)
+    if j > 0:
+        noise = np.random.randint(-j, j + 1, (h, w, 3), dtype=np.int16)
+        bg   += noise
 
-    if rng.random() < 0.6:
+    if add_gradient and rng.random() < 0.6:
         kind = rng.random()
         if kind < 0.5:
             grad = np.linspace(-15, 15, h, dtype=np.int16)[:, None, None]

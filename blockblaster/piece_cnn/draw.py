@@ -12,6 +12,7 @@ from blockblaster.game.pieces import Piece
 from blockblaster.piece_cnn.color import scale_color
 from blockblaster.piece_cnn.config import (
     BORDER_DARKEN_FACTOR,
+    CELL_CORNER_RADIUS_FRAC,
     COLOR_CAST_MAX,
     COLOR_CAST_PROB,
     JPEG_PROB,
@@ -28,6 +29,33 @@ from blockblaster.piece_cnn.config import (
 # Cell drawing
 # ---------------------------------------------------------------------------
 
+def _rounded_rect_mask(h: int, w: int, radius: int) -> np.ndarray:
+    """Float32 alpha mask in [0, 1] for a rounded rectangle of size (h, w)."""
+    radius = max(0, min(radius, h // 2, w // 2))
+    if radius <= 0:
+        return np.ones((h, w), dtype=np.float32)
+    mask = np.ones((h, w), dtype=np.uint8) * 255
+    # Knock out the four corner squares
+    mask[:radius, :radius]    = 0
+    mask[:radius, w - radius:] = 0
+    mask[h - radius:, :radius] = 0
+    mask[h - radius:, w - radius:] = 0
+    # Re-fill each corner with an anti-aliased quarter-disc
+    for cy_corner, cx_corner, ys, xs in (
+        (radius, radius, slice(0, radius), slice(0, radius)),
+        (radius, w - radius, slice(0, radius), slice(w - radius, w)),
+        (h - radius, radius, slice(h - radius, h), slice(0, radius)),
+        (h - radius, w - radius, slice(h - radius, h), slice(w - radius, w)),
+    ):
+        corner = np.zeros((radius, radius), dtype=np.uint8)
+        # cv2.circle gives nice AA on the boundary
+        rel_cy = cy_corner - ys.start
+        rel_cx = cx_corner - xs.start
+        cv2.circle(corner, (rel_cx, rel_cy), radius, 255, -1, lineType=cv2.LINE_AA)
+        mask[ys, xs] = np.maximum(mask[ys, xs], corner)
+    return mask.astype(np.float32) / 255.0
+
+
 def draw_cell(
     canvas: np.ndarray,
     x: int,
@@ -38,8 +66,9 @@ def draw_cell(
     gradient_bevel: bool = False,
     border_frac: float = 0.07,
     border_color: Optional[tuple[int, int, int]] = None,
+    rounded: bool = False,
 ) -> None:
-    """Draw one chamfered cell at pixel (x, y).
+    """Draw one cell at pixel (x, y).
 
     Parameters
     ----------
@@ -51,15 +80,58 @@ def draw_cell(
     border_color:
         BGR colour for the outline.  Defaults to a darker shade of ``color``
         (matching the real game); pass ``(0, 0, 0)`` for the classic black border.
+    rounded:
+        Render with rounded corners (clean / in-game look). The cell is
+        alpha-composited onto the existing canvas so background shows
+        through the corner cut-outs.
     """
     if size < 4:
         return
-    border  = max(1, int(round(size * border_frac)))
+    # Floor border at 1 px for very-thin (clean-mode) borders, 2 px otherwise.
+    border_min = 1 if border_frac < 0.04 else 2
+    border     = max(border_min, int(round(size * border_frac)))
     inset   = border
     fill_x0 = x + inset
     fill_y0 = y + inset
     fill_x1 = x + size - inset - 1
     fill_y1 = y + size - inset - 1
+
+    if rounded:
+        # Build the whole cell (border + fill) in a local tile, then alpha-
+        # blit through a rounded mask so corners are cut against the bg.
+        tile_h = tile_w = size
+        if border_color is None:
+            border_color = scale_color(color, BORDER_DARKEN_FACTOR)
+        tile = np.empty((tile_h, tile_w, 3), dtype=np.uint8)
+        tile[:] = border_color
+        fh = max(1, tile_h - 2 * inset)
+        fw = max(1, tile_w - 2 * inset)
+        if gradient_bevel:
+            light = np.array(scale_color(color, 1.18), dtype=np.float32)
+            dark  = np.array(scale_color(color, 0.72), dtype=np.float32)
+            ramp  = np.linspace(0.0, 1.0, fh, dtype=np.float32)[:, None]
+            col   = (1.0 - ramp) * light + ramp * dark
+            block = np.broadcast_to(col[:, None, :], (fh, fw, 3)).astype(np.uint8)
+            tile[inset:inset + fh, inset:inset + fw] = block
+        else:
+            tile[inset:inset + fh, inset:inset + fw] = color
+
+        radius = int(round(size * CELL_CORNER_RADIUS_FRAC))
+        mask   = _rounded_rect_mask(tile_h, tile_w, radius)[..., None]
+
+        ch, cw = canvas.shape[:2]
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(cw, x + tile_w), min(ch, y + tile_h)
+        if x1 <= x0 or y1 <= y0:
+            return
+        tx0, ty0 = x0 - x, y0 - y
+        tx1, ty1 = tx0 + (x1 - x0), ty0 + (y1 - y0)
+        sub_canvas = canvas[y0:y1, x0:x1].astype(np.float32)
+        sub_tile   = tile[ty0:ty1, tx0:tx1].astype(np.float32)
+        sub_mask   = mask[ty0:ty1, tx0:tx1]
+        blended    = sub_tile * sub_mask + sub_canvas * (1.0 - sub_mask)
+        canvas[y0:y1, x0:x1] = blended.astype(np.uint8)
+        return
 
     if gradient_bevel:
         fh    = max(1, fill_y1 - fill_y0)

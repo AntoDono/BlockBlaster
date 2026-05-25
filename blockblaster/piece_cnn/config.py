@@ -21,10 +21,13 @@ INPUT_SIZE     = 96                  # the CNN operates on 96×96 RGB crops
 SLOT_HEIGHT_RANGE    = (220, 460)
 SLOT_ASPECT_WH_RANGE = (0.55, 1.05)   # slot_w / slot_h
 
-# Fraction of the slot's *shorter* dimension the piece's longest axis fills.
-# Real pieces sit in a lot of padding (~40–55% of the short side).
-PIECE_SIZE_FRAC_RANGE = (0.30, 0.65)
-MIN_CELL_PX           = 10            # never go below this even for large pieces
+# Cell-first sizing: every cell is rendered at the same pixel pitch
+# regardless of piece shape, exactly like the real game. This is the *only*
+# size signal the model gets for distinguishing e.g. 1x1 vs 2x1 or 4x1 vs 5x1,
+# so it must be enforced — never derive cell_px from a target piece footprint.
+CELL_PX_RANGE = (22, 58)
+MIN_CELL_PX   = 14            # hard floor; pieces that would overflow the slot
+                              # grow the slot instead of shrinking the cell.
 
 # ── Background colour ─────────────────────────────────────────────────────────
 BG_HUE_RANGE = (0, 179)              # any hue
@@ -79,3 +82,34 @@ COLOR_CAST_MAX  = 18               # ±BGR offset per channel
 
 OCCLUSION_PROB      = 0.10
 OCCLUSION_SIZE_FRAC = (0.05, 0.22)
+
+# ── Clean / game-view samples ────────────────────────────────────────────────
+# Fraction of generated samples rendered without ANY photo-realistic
+# corruption (no warp/blur/contrast jitter/color cast/occlusion/jpeg, single
+# base colour, normal-contrast background). Matches the pristine in-game view
+# the OCR-style capture path actually feeds the CNN most of the time.
+CLEAN_SAMPLE_FRACTION = 0.5
+
+# Clean-mode background: covers light pastels AND darker muted/earth tones
+# (olive, khaki, dusty rose, slate) — real captures hit V≈120 regularly, not
+# just the bright-pastel range. Saturation goes up to 150 so we cover muted-
+# but-not-grey tones.
+CLEAN_BG_SAT_RANGE = (15, 150)
+CLEAN_BG_VAL_RANGE = (110, 240)
+# Allow occasional low-contrast bg in clean mode (real game sometimes shows a
+# piece whose colour is close in value to the bg).
+CLEAN_LOW_CONTRAST_PROB = 0.15
+
+# Clean-mode cell border: thin, subtle, same hue as the cell (darker shade).
+# In-game the inter-cell separator is barely visible — just enough to outline
+# cells without dominating the look.
+CLEAN_BORDER_FRAC_RANGE = (0.012, 0.030)
+CLEAN_BORDER_DARKEN     = 0.55
+
+# Clean-mode piece-to-slot fill: the rendered piece's longest axis covers
+# this fraction of the slot's short dimension. Real captures show pieces
+# at ~55–75% of the short side.
+CLEAN_PIECE_FILL_RANGE = (0.55, 0.78)
+
+# Clean-mode rounded corners: cell corner radius as a fraction of cell pitch.
+CELL_CORNER_RADIUS_FRAC = 0.16
