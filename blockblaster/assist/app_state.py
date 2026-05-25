@@ -44,6 +44,10 @@ class AppState:
     auto_enabled: bool = False
     auto_last_executed_frame: int = -1
     auto_busy_until: float = 0.0
+    # After each servo attempt finishes, suppress the advisor's published
+    # suggestion for AUTO_POST_PLACE_MS so the UI isn't re-suggesting on
+    # a half-settled board mid clear-animation.
+    suggestion_hold_until: float = 0.0
     # Sticky gate-reason so app_autoplay can log "why did the loop stop
     # firing" exactly once per consecutive run of the same failure,
     # rather than every analyzer tick.

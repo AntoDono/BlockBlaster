@@ -121,8 +121,13 @@ on what they're optimising.
   accum_reward, depth)`.  `accum_reward` is already γ-discounted (each
   `r_k` is added in as `γ^k · r_k`); leaf scoring is `accum_reward +
   γ^depth · V*(leaf)`.
-- `_leaf_score` and `_terminal_score` centralise the leaf math so the
-  three depth blocks stay readable.
+- `_leaf_score` centralises the non-terminal leaf math so the three
+  depth blocks stay readable.  Dead-end (game-over) leaves take their
+  raw `accum_reward` (V*=0 by definition) and are tagged
+  `terminal=True` in the leaf candidate tuple; `_sample_action`
+  filters them out whenever any non-terminal leaf exists, so a
+  high-immediate-reward suicide path can never beat a survivable one
+  on the raw argmax.
 
 ## Parameter knobs that affect the policy
 

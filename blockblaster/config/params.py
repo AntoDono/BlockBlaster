@@ -26,10 +26,10 @@ PRELIFT_CONFIRM_S    = 0.25   # after the pre-lift to board centre, wait up
                              # follower catches up.  Abort if exceeded.
 
 # ── SERVO: loop pacing ──────────────────────────────────────────────────
-MAX_LOOP_S           = 10.0   # total servo budget per placement.
+MAX_LOOP_S           = 3.0   # total servo budget per placement.
 SETTLE_MS            = 50    # sleep after each move() so the next frame
                              # samples a settled piece.
-FRAME_TIMEOUT_S      = 0.25  # how long to wait for a fresh frame per iter.
+FRAME_TIMEOUT_S      = 0.05  # how long to wait for a fresh frame per iter.
 MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
                              # before giving up.  Higher = more patience
                              # when the matcher briefly loses the piece
@@ -39,7 +39,7 @@ MAX_NO_PIECE_FRAMES  = 16    # consecutive frames without a detected piece
 GAIN                 = 1.5   # P term.  Rough estimate of piece-px per
                              # finger-px; smaller = larger steps for the
                              # same error, faster but more overshoot-prone.
-DERIV_GAIN           = 2.2   # D term.  Damps overshoot by anticipating
+DERIV_GAIN           = 2.5   # D term.  Damps overshoot by anticipating
                              # the piece's motion: when the error is
                              # shrinking (piece is already heading toward
                              # the target), the next step is reduced by
@@ -74,7 +74,7 @@ MOVE_SUBSTEPS        = 64
 MOVE_SUBSTEP_MS      = 2
 
 # ── SERVO: lock criteria ────────────────────────────────────────────────
-LOCK_TOL_PX          = 3    # |err| px tolerance on both axes.
+LOCK_TOL_PX          = 6    # |err| px tolerance on both axes.
 LOCK_SCORE_MIN       = 0.30  # required template-match score to release.
 LOCK_MIN_ANCHORS     = 5     # minimum visible anchors (out of 5) the
                              # release will accept.  Was "all 5" before,
@@ -152,19 +152,43 @@ SEARCH_RADIUS_CELLS  = 4.0   # half-extent of the matchTemplate window,
 # release.  Persistence guard avoids reacting to single-frame flashes
 # (score popups, transient animations) that aren't actual row-clear
 # previews.
-GLOW_AREA_RATIO      = 1.5   # motion-mask area / piece silhouette area.
+GLOW_AREA_RATIO      = 1.2   # motion-mask area / piece silhouette area.
                              # Above this = much more is lit up than just
                              # the piece → likely a row-clear glow.
 GLOW_HOLD_S          = 1.0   # sustained duration above the ratio before
                              # we commit.  Long enough to filter out
                              # transient flashes we didn't intend.
 
+# ── SERVO: off-board corner recovery ────────────────────────────────────
+# When a piece drifts partially off the board, the corner anchors on the
+# off-side stop reporting (their cell windows have no motion to detect).
+# Compare the set of *currently visible* corner anchors against the set
+# of corners we'd expect to see *at the target* (corners whose cell is
+# on-board at target).  If a corner that should be visible isn't,
+# sustained for OFF_BOARD_HOLD_S, override the PD step with a fixed
+# inward nudge until the missing corner re-appears.  Direction comes
+# from which side's corners are missing (e.g. TR+BR missing → push -x).
+OFF_BOARD_HOLD_S     = 0.15  # sustained duration of "missing corner that
+                             # should be visible at target" before the
+                             # recovery override fires.  Filters out
+                             # transient occlusions (score popups, level
+                             # animations, etc.) that briefly drop a
+                             # corner without the piece actually being
+                             # off-board.
+RECOVERY_STEP_CELLS  = 0.4   # per-iter recovery step magnitude, in
+                             # cells.  Slow enough to give the matcher
+                             # time to re-acquire the corner once it
+                             # comes back on-board, but big enough to
+                             # actually unstick the piece (fractions of
+                             # a cell got swallowed by the matcher's
+                             # resolution on test runs).
+
 
 # ── AUTOPLAY: assist GUI (app_autoplay.py) ──────────────────────────────
-AUTO_CONF_THRESHOLD  = 0.3   # min CNN confidence across all 3 queue slots
+AUTO_CONF_THRESHOLD  = 0.4   # min CNN confidence across all 3 queue slots
                              # before the assist GUI will dispatch a servo.
 AUTO_POST_PLACE_MS   = 1500   # cooldown after the servo completes.
-AUTO_SERVO_BUDGET_MS = 10000  # outer cap on a single servo run, in ms.
+AUTO_SERVO_BUDGET_MS = 3000  # outer cap on a single servo run, in ms.
 
 # ── AUTOPLAY: headless loop (control/auto_player.py) ────────────────────
 CONF_THRESHOLD       = 0.3  # skip a frame if any slot confidence is

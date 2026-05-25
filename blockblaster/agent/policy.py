@@ -29,10 +29,22 @@ The policy uses beam search across the full 3-piece queue:
               return first_action of the global argmax.
 
 Intermediate states are scored with the remaining unplaced pieces as queue
-context — consistent with how the net was trained.  Dead-end beams (no legal
-position for the next piece) take their accumulated reward so far with V=0
-(terminal state).  Distinct orderings of the 3 queue pieces are tried and
-the best first_action across all orderings is returned.
+context — consistent with how the net was trained.  Distinct orderings of
+the 3 queue pieces are tried and the best first_action across all orderings
+is returned.
+
+Game-over handling
+==================
+A "dead-end" leaf — where the next piece in the planned ordering has no
+legal position on the resulting board — is the search's view of *game
+over*.  These leaves used to be scored as just ``accum_reward`` (V*=0),
+which let a high-immediate-reward suicide path (e.g. clear two rows now,
+then can't fit the next piece) beat a low-immediate-reward survival
+path on the raw argmax.  We now flag dead-end leaves as terminal and
+filter them at selection time: if **any** non-terminal continuation
+exists for **any** action, we pick from those alone.  Only when every
+action is forced into a terminal leaf (unavoidable death within the
+3-piece window) do we fall back to ranking among terminal leaves.
 
 See `blockblaster/game/potential.py`, `blockblaster/game/scoring.py`,
 and `blockblaster/train/dataset.py`.
@@ -165,39 +177,64 @@ def _leaf_score(accum_reward: float, depth: int, vstar: float) -> float:
     return accum_reward + (param.GAMMA ** depth) * vstar
 
 
-def _terminal_score(accum_reward: float) -> float:
-    """Dead-end leaf: V*=0 (terminal), keep whatever reward we already earned."""
-    return accum_reward
+# Leaf candidate: ``(first_action, score, terminal)``.
+#   - ``terminal=False``: the 3-piece lookahead reached its planned depth
+#     (or the queue legitimately ran out) without the next piece being
+#     unplaceable.  ``score`` is the full discounted return including
+#     ``γ^depth · V*(leaf)``.
+#   - ``terminal=True``: at some point in the planned ordering the next
+#     piece had no legal position on the resulting board → game over.
+#     ``score`` is the discounted reward accumulated *up to* the dead-end
+#     (V*=0 by definition).  These leaves are filtered out at selection
+#     time whenever any non-terminal leaf exists.
+LeafCandidate = tuple[tuple[int, int, int], float, bool]
 
 
 def _sample_action(
-    candidates: list[tuple[tuple[int, int, int], float]],
+    candidates: list[LeafCandidate],
     temperature: float,
     top_m: int,
 ) -> tuple[int, int, int]:
-    """Pick an action from `(first_action, score)` candidates.
+    """Pick an action from ``(first_action, score, terminal)`` candidates.
 
-    - `temperature == 0.0`: argmax (deterministic, eval-safe).
-    - `temperature > 0`: dedupe by first_action keeping its best score, take
-      the top-M, then sample one with probability softmax(score / τ).
+    Selection algorithm:
 
-    The dedupe matters because the same `first_action` can appear in many
-    candidates (different queue orderings, different downstream placements);
-    we want each distinct *first move* to compete on its best continuation.
+    1. Partition candidates by action into ``best_safe[a]`` (best score
+       over the action's non-terminal leaves) and ``best_unsafe[a]``
+       (best score over its terminal leaves).
+    2. If any action has a safe leaf → restrict the pool to safe actions
+       and use ``best_safe`` as their score.  Otherwise (every action
+       leads to an unavoidable game-over within the 3-piece lookahead),
+       fall back to ranking among ``best_unsafe`` — best of a bad
+       situation.
+    3. ``temperature == 0.0`` → argmax (deterministic, eval-safe).
+       ``temperature > 0`` → softmax-sample one of the top-M with
+       weight ``exp(score / τ)``.
+
+    The per-action dedupe matters because the same ``first_action`` can
+    appear in many candidates (different queue orderings, different
+    downstream placements); we want each distinct *first move* to
+    compete on its best safe continuation.
     """
     if not candidates:
         raise RuntimeError("_sample_action called with no candidates")
 
+    best_safe: dict[tuple[int, int, int], float] = {}
+    best_unsafe: dict[tuple[int, int, int], float] = {}
+    for action, score, terminal in candidates:
+        target = best_unsafe if terminal else best_safe
+        if action not in target or score > target[action]:
+            target[action] = score
+
+    # Prefer safe actions whenever any exist; only consider unsafe
+    # actions when *every* action leads to a forced game-over.
+    pool_dict = best_safe if best_safe else best_unsafe
+
     if temperature <= 0.0:
-        best_action, _ = max(candidates, key=lambda x: x[1])
+        best_action, _ = max(pool_dict.items(), key=lambda kv: kv[1])
         return best_action
 
-    best_by_action: dict[tuple[int, int, int], float] = {}
-    for action, score in candidates:
-        if action not in best_by_action or score > best_by_action[action]:
-            best_by_action[action] = score
-
-    ranked = sorted(best_by_action.items(), key=lambda kv: kv[1], reverse=True)
+    ranked = sorted(pool_dict.items(), key=lambda kv: kv[1], reverse=True)
     pool = ranked[: max(1, top_m)]
     if len(pool) == 1:
         return pool[0][0]
@@ -297,10 +334,14 @@ def select_action(
     beams: list[_BeamEntry] = _top_k(d1_cands, d1_scores, width)
 
     # Collect ALL leaf-score candidates across depths.  Each entry is
-    # (first_action, score); the same first_action can appear multiple times
-    # (e.g. via different queue orderings or downstream placements) and the
-    # sampler dedupes by keeping each first_action's best score.
-    leaf_candidates: list[tuple[tuple[int, int, int], float]] = []
+    # ``(first_action, score, terminal)``; the same first_action can
+    # appear multiple times (different queue orderings, different
+    # downstream placements).  ``terminal=True`` marks a dead-end leaf
+    # where the next planned piece had no legal position — the search's
+    # view of *game over*.  ``_sample_action`` filters these out
+    # whenever any non-terminal leaf exists, so a high-scoring suicide
+    # path can't beat a survivable one on raw argmax.
+    leaf_candidates: list[LeafCandidate] = []
 
     # ------------------------------------------------------------------
     # Depth 1 -> 2: expand the second piece on surviving beams.
@@ -308,15 +349,21 @@ def select_action(
     d2_cands: list[_BeamEntry] = []
     for first_action, g1, remaining, accum1, _depth1 in beams:
         if not remaining:
-            # Queue had only 1 piece — this beam is already a leaf at depth 1.
+            # Queue had only 1 piece — this beam is already a leaf at
+            # depth 1.  Not terminal: we successfully consumed the
+            # queue, the resulting board is fine.
             vstar = _batch_score([g1], [[]], net, net_device, chunk)[0]
-            leaf_candidates.append((first_action, _leaf_score(accum1, 1, vstar)))
+            leaf_candidates.append(
+                (first_action, _leaf_score(accum1, 1, vstar), False),
+            )
             continue
         p1 = remaining[0]
         positions = _legal_positions(g1, p1)
         if not positions:
-            # Dead-end at depth 2: keep accum_reward, no future value.
-            leaf_candidates.append((first_action, _terminal_score(accum1)))
+            # Dead-end: next planned piece has nowhere to land → game
+            # over.  V*=0, flag terminal.  Filtered at selection unless
+            # every action is similarly forced.
+            leaf_candidates.append((first_action, accum1, True))
             continue
         rem2 = remaining[1:]
         for r, c in positions:
@@ -345,14 +392,18 @@ def select_action(
     d3_cands: list[tuple[tuple[int, int, int], np.ndarray, float]] = []
     for first_action, g2, remaining, accum2, _depth2 in beams:
         if not remaining:
-            # Queue had only 2 pieces — leaf at depth 2.
+            # Queue had only 2 pieces — leaf at depth 2.  Not terminal:
+            # both queued pieces placed successfully.
             vstar = _batch_score([g2], [[]], net, net_device, chunk)[0]
-            leaf_candidates.append((first_action, _leaf_score(accum2, 2, vstar)))
+            leaf_candidates.append(
+                (first_action, _leaf_score(accum2, 2, vstar), False),
+            )
             continue
         p2 = remaining[0]
         positions = _legal_positions(g2, p2)
         if not positions:
-            leaf_candidates.append((first_action, _terminal_score(accum2)))
+            # Dead-end at depth 3: game over.
+            leaf_candidates.append((first_action, accum2, True))
             continue
         for r, c in positions:
             new_grid, lines = _place_and_clear(g2, p2, r, c)
@@ -367,6 +418,8 @@ def select_action(
             net, net_device, chunk,
         )
         for (first_action, _, accum3), v in zip(d3_cands, d3_vstar):
-            leaf_candidates.append((first_action, _leaf_score(accum3, 3, v)))
+            leaf_candidates.append(
+                (first_action, _leaf_score(accum3, 3, v), False),
+            )
 
     return _sample_action(leaf_candidates, temperature, top_m)

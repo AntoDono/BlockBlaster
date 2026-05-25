@@ -71,7 +71,7 @@ Each stage is a real, runnable subsystem — not a notebook stub. The agent that
 
 **The perception stack** is built on a tiny piece-classifier CNN trained entirely on synthetic data — every queue tile, every render variant, generated on the fly. The assist GUI overlays the agent's planned move on the mirrored screen in real time and includes a **reconstructed-scene panel** that lets you see what the scanner sees (placed cells, ghost preview, queue confidences). See [`docs/assist-gui.md`](docs/assist-gui.md).
 
-**The visual servo** is the bit most projects skip. It closes the loop on the device: every frame, threshold the board crop to a binary mask, subtract the pre-grab snapshot, template-match the held piece's silhouette against the diff, and P-step the finger toward the matched centroid until the error and the match score are both inside their tolerances — then lift.
+**The visual servo** is the bit most projects skip. It closes the loop on the device: every frame, diff the board crop against the pre-grab snapshot to get a motion mask, diff again against the previous frame as a glow-resistant translation gate, template-match the held piece's silhouette within a small window around the last trusted location, and PD-step the finger toward the matched anchors until the error and the match score are both inside their tolerances — then lift.
 
 ## Quick start
 
@@ -120,7 +120,7 @@ Honest about what works and what doesn't:
 
 - **Simulation pipeline:** stable. Train, evaluate, watch in-sim.
 - **iOS assist (read-only overlay):** works on a mirrored iPhone — pure visualisation, no input injection (Apple doesn't allow it without a paired Mac/Xcode signature).
-- **Android auto-play:** working but device-specific. The servo's HSV threshold and match-score tolerances may need a small retune for very different board palettes; see the tunables block at the top of `blockblaster/control/servo.py`.
+- **Android auto-play:** working but device-specific. The servo's diff threshold and match-score tolerances may need a small retune for very different board palettes; the geometry-related knobs (step sizes, error thresholds, search radius) are expressed as cell ratios and resolve from the calibrated grid automatically. See [`blockblaster/config/params.py`](blockblaster/config/params.py).
 - **Calibration:** semi-manual on first use — drop the grid + queue boxes on the mirrored frame once, persisted to JSON for subsequent runs.
 
 If you fork this and play with a different game, the perception + control split is reusable: the servo doesn't know anything about Block Blast specifically, only about "drag this finger so that thing on screen lines up with that target."

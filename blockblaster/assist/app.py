@@ -200,6 +200,11 @@ def run(
             suggestion        = state.frozen_suggestion
             queue             = state.frozen_queue
             queue_confidences = state.frozen_confidences
+        elif pygame.time.get_ticks() < state.suggestion_hold_until:
+            # Post-servo quiet window: suppress the advisor's suggestion so the
+            # UI isn't latching onto a half-settled board mid-clear-animation.
+            suggestion        = None
+            queue_confidences = []
 
         # ── Render ───────────────────────────────────────────────────────
         screen.fill(BG_COLOR)

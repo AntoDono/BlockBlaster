@@ -63,7 +63,9 @@ def _run_servo_safely(
         # the next placement can fire as soon as this one actually
         # finished, instead of waiting out the full AUTO_SERVO_BUDGET_MS
         # we reserved at dispatch time as a worst-case upper bound.
-        state.auto_busy_until = pygame.time.get_ticks() + AUTO_POST_PLACE_MS
+        _cooldown_until = pygame.time.get_ticks() + AUTO_POST_PLACE_MS
+        state.auto_busy_until        = _cooldown_until
+        state.suggestion_hold_until  = _cooldown_until
 
 
 def maybe_execute_auto_swipe(
@@ -177,4 +179,5 @@ def maybe_execute_auto_swipe(
         state.frozen_suggestion  = None
         state.frozen_queue       = []
         state.frozen_confidences = []
+        state.suggestion_hold_until = pygame.time.get_ticks() + AUTO_POST_PLACE_MS
         analyzer.resume()

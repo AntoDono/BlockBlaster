@@ -70,17 +70,42 @@ move runs a closed-loop visual servo whose detector is
 colour/palette-invariant and whose controller is a PD with a
 distance-adaptive step ceiling.
 
-### Detection (frame-diff + template match)
+### Detection (two motion masks + windowed template match)
 
 The grayscale board crop is snapshotted just before DOWN as a
-baseline; per frame we compute `cv2.absdiff(current, baseline)`,
-threshold, morph-close → a binary "this pixel moved" mask. The held
-piece is the only thing in motion on the board, so its rendered
-footprint is exactly what lights up — regardless of colour,
-translucency, or ghost-preview noise. `cv2.matchTemplate` of the
-known piece silhouette against that mask gives the rigid initial
-pose. No tracker state between frames; every frame is a fresh global
-search.
+**baseline**; per frame we compute `cv2.absdiff(current, baseline)`,
+threshold, morph-close → a binary "this pixel differs from the empty
+board" mask. The held piece's rendered footprint lights up here
+regardless of colour, translucency, or ghost-preview noise.
+`cv2.matchTemplate` of the known piece silhouette against that mask
+gives the rigid pose.
+
+Two extra mechanisms turn this from "every frame is a fresh global
+search" into something glow-resistant and phantom-resistant:
+
+- **Rolling mask** (`absdiff(current, previous_frame)`). Silent on
+  steady-state pixels — once a row-clear glow lights up it stops
+  *changing* and disappears from the rolling diff, even though it's
+  still in the baseline diff. Used as a gate: trust the
+  baseline-matcher's detection only when the rolling mask has at
+  least `ROLLING_GATE_MIN_RATIO` (default 5%) of the matched
+  footprint lit. Bypassed within `ROLLING_GATE_RELAX_FACTOR ×
+  LOCK_TOL_PX` of the target — a settled piece doesn't move
+  frame-to-frame, so we'd otherwise lose it right at lock-in.
+- **Local search window**. Once seeded with a trusted top-left from
+  the pre-lift confirmation match, every subsequent matchTemplate is
+  restricted to a `SEARCH_RADIUS_CELLS`-cell half-extent window
+  around `last_trusted_tl + commanded_dx,dy`. Phantoms (debris,
+  score popups, already-placed cells that brightened) more than a
+  few cells away from where the piece actually is become
+  unreachable by construction — `matchTemplate`'s argmax can't even
+  consider them.
+
+The local window also means we **do** keep a small amount of tracker
+state between frames: `prev_gray` (for the rolling diff) and
+`last_trusted_tl_px` (for the window centre). Both update only when
+the rolling gate clears, so a single phantom-confused frame can't
+poison the seed.
 
 ### Per-frame measurement: 5 anchors
 
@@ -119,18 +144,22 @@ popups) don't bias the average.
 of P, it's nulled — the piece coasts one frame instead of overshooting
 near zero error.
 
-The per-iter step ceiling is distance-adaptive:
+The per-iter step ceiling is distance-adaptive. All four knobs are
+expressed as multiples of one board cell so the servo just-works
+across different phone resolutions / calibration boxes without
+re-tuning; `place()` resolves them to pixels once at the top of the
+function from the calibrated grid.
 
 ```
-|err| ≥ FAR_ERR_PX   → cap = MAX_STEP_FAR_PX   (cover ground fast)
-|err| ≤ NEAR_ERR_PX  → cap = MAX_STEP_NEAR_PX  (fine alignment)
-in between           → linearly interpolated
+|err| ≥ FAR_ERR_CELLS  × cell  → cap = STEP_FAR_CELLS  × cell  (cover ground fast)
+|err| ≤ NEAR_ERR_CELLS × cell  → cap = STEP_NEAR_CELLS × cell  (fine alignment)
+in between                     → linearly interpolated
 ```
 
 Per-axis, so a piece aligned on x but far on y still gets a fast y
-step without throwing x off. `MAX_STEP_FAR_PX` is bounded by Block
-Blast's drag-follower lag: too fast and the next frame reads a stale
-position and the PD overshoots. Each PD step is interpolated into
+step without throwing x off. The far step is bounded by Block Blast's
+drag-follower lag: too fast and the next frame reads a stale position
+and the PD overshoots. Each PD step is interpolated into
 `MOVE_SUBSTEPS` touch events `MOVE_SUBSTEP_MS` apart so the in-game
 drag follower renders continuously.
 
@@ -154,24 +183,31 @@ corner anchors are off-board — the mean-of-visible error is still
 accurate from as few as 2 anchors.
 
 If the matcher loses the piece for `MAX_NO_PIECE_FRAMES` consecutive
-iters, abort. If `MAX_LOOP_S` elapses without lock, lift in place
-(don't drag back to the queue).
+iters, abort. "Loses the piece" includes both a low-score match and a
+match that fails the rolling gate — frames where the matcher claims a
+location but no real motion happens there both count. The counter
+only resets after a frame is *fully* trusted (anchors found AND gate
+cleared), so a placement that gets stuck on a phantom blob doesn't
+oscillate forever; it aborts within ~`MAX_NO_PIECE_FRAMES` frames. If
+`MAX_LOOP_S` elapses without lock, lift in place (don't drag back to
+the queue).
 
 ### Pre-clear glow early release
 
 When the held piece is hovering over a position that would complete a
 row or column, Block Blast pre-renders a glow over the cells that
-would clear. That glow paints the motion-diff mask far beyond the
-piece's own footprint and can fool the template matcher into reporting
-a stale position — the controller then sees a phantom error and
-chases pixels that aren't really the piece. (Symptom: the reconstructed
-scene shows the just-placed piece "stuck" up in the board while
-visually it has already dropped into the bottom row.)
+would clear. That glow paints the baseline motion-diff mask far
+beyond the piece's own footprint. The rolling gate and the local
+search window already prevent the matcher from being *steered* by it
+(rolling diff is silent on steady-state glow; the window keeps the
+argmax local to the real piece), but the glow is also a strong signal
+that we're on a good placement — so we use it as a positive trigger
+for early release.
 
 The piece is, by definition, on an optimal placement when the glow
 appears, so we just release. The check sits before the matcher-driven
-PD logic so it works even when the glow has already confused the
-matcher:
+PD logic so it fires even on frames where the matcher itself might
+otherwise be confused:
 
 ```
 mask_area_px = nonzero(motion_mask)
