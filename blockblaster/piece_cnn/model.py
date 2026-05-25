@@ -22,12 +22,17 @@ DEFAULT_WEIGHT_PATH = Path("piece_cnn.pt")
 
 
 class PieceCNN(nn.Module):
-    """Compact convnet — ~600 K params, runs in <2 ms per crop on CPU.
+    """Convnet — ~3.6 M params, runs in <5 ms per crop on CPU, much faster on GPU.
 
-    Head keeps an 8×8 spatial grid (no global pool) — counting cells (4x1 vs
-    5x1) needs ≥ 2× the count of bins on each axis to be unambiguous, so 8×8
-    is the minimum that can reliably resolve up to 5 stacked cells. Earlier
-    versions used 4×4 and systematically undercounted long bars by 1 cell.
+    Two changes from the original 300 K model:
+
+    1. Pool only twice (96 → 48 → 24) instead of three times. Keeping a 24×24
+       feature map (was 12×12) doubles the spatial resolution available to
+       the head, so 5 stacked cells project to 5+ distinct horizontal /
+       vertical bins instead of getting squashed to 2-3.
+    2. Head keeps a 12×12 grid (was 4×4 → 8×8). Counting cells (4x1 vs 5x1)
+       needs ≥ 2× the count of bins per axis to be unambiguous; 12 bins
+       comfortably resolves any piece up to 5 cells long with margin.
     """
 
     def __init__(self, num_classes: int = NUM_CLASSES) -> None:
@@ -39,16 +44,16 @@ class PieceCNN(nn.Module):
         self.bn2   = nn.BatchNorm2d(64)
         self.bn3   = nn.BatchNorm2d(96)
         self.pool  = nn.MaxPool2d(2)
-        self.head_pool = nn.AdaptiveAvgPool2d((8, 8))
+        self.head_pool = nn.AdaptiveAvgPool2d((12, 12))
         self.dropout   = nn.Dropout(0.2)
-        self.fc1       = nn.Linear(96 * 8 * 8, 192)
-        self.fc2       = nn.Linear(192, num_classes)
+        self.fc1       = nn.Linear(96 * 12 * 12, 256)
+        self.fc2       = nn.Linear(256, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(F.relu(self.bn1(self.conv1(x))))   # 96 → 48
         x = self.pool(F.relu(self.bn2(self.conv2(x))))   # 48 → 24
-        x = self.pool(F.relu(self.bn3(self.conv3(x))))   # 24 → 12
-        x = self.head_pool(x).flatten(1)                  # → (B, 96*8*8)
+        x = F.relu(self.bn3(self.conv3(x)))               # 24 (no pool)
+        x = self.head_pool(x).flatten(1)                  # → (B, 96*12*12)
         x = F.relu(self.fc1(self.dropout(x)))
         return self.fc2(x)                                # logits
 

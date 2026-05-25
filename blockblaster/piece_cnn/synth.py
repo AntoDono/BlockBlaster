@@ -40,6 +40,7 @@ from blockblaster.piece_cnn.config import (
     MULTI_COLOR_PROB,
     NUM_CLASSES,
     NUM_PIECES,
+    PIECE_SAMPLE_WEIGHTS,
     ROTATION_JITTER_DEG,
     SHADOW_PROB,
     SHEAR_JITTER,
@@ -169,7 +170,7 @@ def render_piece_sample(
             sat_range=CLEAN_BG_SAT_RANGE,
             val_range=CLEAN_BG_VAL_RANGE,
             add_gradient=False,
-            jitter=4,
+            jitter=0,
         )
     else:
         canvas = random_background(slot_h, slot_w, rng, forced_hsv=forced_bg_hsv)
@@ -249,6 +250,9 @@ def render_piece_sample(
 # Batch generator
 # ---------------------------------------------------------------------------
 
+_PIECE_WEIGHTS = [PIECE_SAMPLE_WEIGHTS.get(p.name, 1.0) for p in PIECES]
+
+
 def generate_batch(
     batch_size: int,
     rng: random.Random,
@@ -262,11 +266,16 @@ def generate_batch(
 
     ``clean_fraction`` is the share of samples rendered with no photo-
     realistic corruption (see ``render_piece_sample`` ``clean=True``).
+    Pieces are drawn according to ``PIECE_SAMPLE_WEIGHTS`` so historically-
+    confused classes (long bars, 5-cell L's) get oversampled.
     """
     images = np.empty((batch_size, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     labels = np.empty((batch_size,), dtype=np.int64)
     for i in range(batch_size):
-        piece     = None if rng.random() < empty_fraction else rng.choice(PIECES)
+        if rng.random() < empty_fraction:
+            piece = None
+        else:
+            piece = rng.choices(PIECES, weights=_PIECE_WEIGHTS, k=1)[0]
         clean     = rng.random() < clean_fraction
         images[i] = render_piece_sample(piece, rng, clean=clean)
         labels[i] = class_id_for(piece)

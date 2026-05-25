@@ -83,6 +83,18 @@ COLOR_CAST_MAX  = 18               # ±BGR offset per channel
 OCCLUSION_PROB      = 0.10
 OCCLUSION_SIZE_FRAC = (0.05, 0.22)
 
+# ── Per-piece sampling weights ───────────────────────────────────────────────
+# Bias the random piece sampling so historically-confused classes get more
+# training examples. Keyed by piece NAME (see blockblaster.game.pieces.PIECES).
+# Anything not listed gets weight 1.0. Long bars and 5-cell L-shapes are the
+# main repeat offenders for cell-miscounting; bump them ~3x.
+PIECE_SAMPLE_WEIGHTS: dict[str, float] = {
+    "1x4": 3.0, "1x5": 3.0,
+    "4x1": 3.0, "5x1": 3.0,
+    "1x3": 1.5, "3x1": 1.5,
+    "L_5_TL": 2.0, "L_5_TR": 2.0, "L_5_BL": 2.0, "L_5_BR": 2.0,
+}
+
 # ── Clean / game-view samples ────────────────────────────────────────────────
 # Fraction of generated samples rendered without ANY photo-realistic
 # corruption (no warp/blur/contrast jitter/color cast/occlusion/jpeg, single
@@ -106,10 +118,12 @@ CLEAN_LOW_CONTRAST_PROB = 0.15
 CLEAN_BORDER_FRAC_RANGE = (0.012, 0.030)
 CLEAN_BORDER_DARKEN     = 0.55
 
-# Clean-mode piece-to-slot fill: the rendered piece's longest axis covers
-# this fraction of the slot's short dimension. Real captures show pieces
-# at ~55–75% of the short side.
-CLEAN_PIECE_FILL_RANGE = (0.55, 0.78)
+# Clean-mode piece-to-slot fill: the rendered piece's long axis covers this
+# fraction of the slot dimension matching that axis. Real captures vary a
+# lot — sometimes the piece is tightly cropped, sometimes there's a lot of
+# padding above/below it. A wide range here teaches the model to count
+# cells at multiple scales instead of overfitting to one specific pitch.
+CLEAN_PIECE_FILL_RANGE = (0.40, 0.88)
 
 # Clean-mode rounded corners: cell corner radius as a fraction of cell pitch.
 CELL_CORNER_RADIUS_FRAC = 0.16
