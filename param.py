@@ -21,8 +21,8 @@ GAMMA: float = 0.99
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
-NUM_SIMULATIONS: int = 250
-MAX_SIMULATIONS: int = 3000       # cap on total episodes kept; oldest are deleted when exceeded
+NUM_SIMULATIONS: int = 150
+MAX_SIMULATIONS: int = 1500       # cap on total episodes kept; oldest are deleted when exceeded
 MAX_STEPS_PER_EPISODE: int = 6000 # hard cap per episode to prevent infinite games
 SIM_EPSILON: float = 0.0           # ε-greedy uniform exploration; superseded by SIM_TEMPERATURE for net-driven exploration. Kept for the random-policy fallback when no checkpoint exists.
 # Boltzmann sampling over the top-M final beam leaves during DATA-COLLECTION
@@ -112,11 +112,11 @@ TARGET_REFRESH_BATCHES: int = 5000
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
-NUM_EPOCHS: int = 5
-BATCH_SIZE: int = 1024
+NUM_EPOCHS: int = 2
+BATCH_SIZE: int = 2048
 LEARNING_RATE: float = 1e-4
 WEIGHT_DECAY: float = 3e-4
-TEST_SPLIT: float = 0.2           # fraction of episodes held out for test
+TEST_SPLIT: float = 0.1         # fraction of episodes held out for test
 EVAL_INTERVAL_EPOCHS: int = 5
 SPLIT_SEED: int = 0
 
