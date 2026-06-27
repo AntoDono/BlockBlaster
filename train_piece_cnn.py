@@ -46,6 +46,7 @@ TARGET_VAL_ACC    = 0.995       # stop early if reached
 REAL_DATA_DIR  = DEFAULT_DATA_DIR  # data/pieces/<label>/<uuid>.png
 REAL_VAL_FRAC  = 0.15    # fraction of real crops held out for the real-val metric
 REAL_OVERSAMPLE = 50     # repeat each real train crop N× so it isn't drowned by synth
+REAL_LOSS_WEIGHT = 5.0   # per-sample loss weight for real crops (synth = 1.0)
 REAL_SPLIT_SEED = 123    # deterministic real train/val split
 
 
@@ -148,6 +149,14 @@ def main() -> None:
     pin     = device.type == "cuda"
     train_x = _to_tensor(train_imgs).pin_memory() if pin else _to_tensor(train_imgs)
     train_y = torch.from_numpy(train_lbls).pin_memory() if pin else torch.from_numpy(train_lbls)
+
+    weights = np.ones(len(train_lbls), dtype=np.float32)
+    if n_real_tr:
+        weights[-n_real_tr:] = REAL_LOSS_WEIGHT
+    train_w = torch.from_numpy(weights)
+    if pin:
+        train_w = train_w.pin_memory()
+
     val_x   = _to_tensor(val_imgs).pin_memory() if pin else _to_tensor(val_imgs)
     val_y   = torch.from_numpy(val_lbls).pin_memory() if pin else torch.from_numpy(val_lbls)
     del train_imgs, val_imgs   # free the uint8 staging copies
@@ -192,9 +201,11 @@ def main() -> None:
             idx = perm[i : i + BATCH_SIZE]
             x = train_x[idx].to(device, non_blocking=True)
             y = train_y[idx].to(device, non_blocking=True)
+            w = train_w[idx].to(device, non_blocking=True)
 
             logits = net(x)
-            loss = F.cross_entropy(logits, y)
+            per_sample = F.cross_entropy(logits, y, reduction="none")
+            loss = (per_sample * w).sum() / w.sum()
             opt.zero_grad()
             loss.backward()
             opt.step()
