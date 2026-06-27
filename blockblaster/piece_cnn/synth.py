@@ -1,10 +1,8 @@
 """Synthetic Block Blast piece renderer for training the queue CNN.
 
 Renders each canonical :class:`Piece` as a chamfered-cube grid on a
-randomly-coloured background.  All rendering constants live in
-:mod:`blockblaster.piece_cnn.config`, colour helpers in
-:mod:`blockblaster.piece_cnn.color`, and drawing primitives in
-:mod:`blockblaster.piece_cnn.draw`.
+randomly-coloured background. Constants live in ``config``, colour helpers in
+``color``, drawing primitives in ``draw``.
 """
 
 from __future__ import annotations
@@ -70,10 +68,6 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Class-id helpers
-# ---------------------------------------------------------------------------
-
 def class_id_for(piece: Optional[Piece]) -> int:
     """Map a Piece (or None for empty) to its class id."""
     return EMPTY_CLASS_ID if piece is None else piece.piece_id
@@ -89,10 +83,6 @@ def piece_for_class(class_id: int) -> Optional[Piece]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Sample renderer
-# ---------------------------------------------------------------------------
-
 def render_piece_sample(
     piece: Optional[Piece],
     rng: random.Random,
@@ -103,49 +93,36 @@ def render_piece_sample(
 ) -> np.ndarray:
     """Render one synthetic slot crop (BGR uint8, ``INPUT_SIZE × INPUT_SIZE``).
 
-    Pass ``piece=None`` to render an empty slot.  Random parameters are drawn
-    from the configured ranges unless overridden via keyword args.
-
-    ``clean=True`` produces a pristine in-game view: no perspective warp /
-    blur / contrast jitter / colour cast / occlusion / JPEG, a single base
-    colour per piece, and a normal-contrast background. Use this to model the
-    bulk of real screen captures where the queue slot is shown verbatim.
+    Pass ``piece=None`` for an empty slot. ``clean=True`` produces a pristine
+    in-game view (no warp/blur/jitter/cast/occlusion/JPEG, single base colour,
+    normal-contrast background); otherwise full photo-realistic corruption.
     """
     if slot_h is None:
         slot_h = rng.randint(*SLOT_HEIGHT_RANGE)
     if slot_w is None:
         slot_w = max(40, int(round(slot_h * rng.uniform(*SLOT_ASPECT_WH_RANGE))))
 
-    # Cell-first sizing: pick the per-cell pixel pitch FIRST, identical for
-    # every piece shape (this is what the real game does). The piece footprint
-    # then follows from cols/rows. If it would overflow the slot, grow the
-    # slot rather than shrinking the cell, so a 1x1 cell stays the same size
-    # as a single cell of a 5x1.
+    # Pick the per-cell pitch first (identical for every shape, like the real
+    # game); the footprint follows from cols/rows.
     if piece is not None and cell_px is None:
         cell_px = rng.randint(*CELL_PX_RANGE)
     if piece is not None:
         cell_px = max(MIN_CELL_PX, int(cell_px))
 
         if clean:
-            # Size the slot so the piece's LONG axis fills `fill_frac` of the
-            # matching slot dimension (height for tall pieces, width for wide
-            # ones). Earlier we sized against the short dim, which let a 5x1
-            # render as just 30% of slot height — after the 96x96 resize each
-            # cell was ~6 px tall and the model literally could not tell 4 vs
-            # 5 cells apart. This keeps cells big enough to count.
+            # Size the slot so the piece's long axis fills `fill_frac` of the
+            # matching slot dimension, keeping cells big enough to count.
             fill_frac  = rng.uniform(*CLEAN_PIECE_FILL_RANGE)
             piece_w_px = piece.cols * cell_px
             piece_h_px = piece.rows * cell_px
 
             if piece.rows >= piece.cols:
-                # Tall (or square) piece — match height.
                 slot_h = max(piece_h_px + 8, int(round(piece_h_px / fill_frac)))
-                aspect = rng.uniform(*SLOT_ASPECT_WH_RANGE)   # w/h
+                aspect = rng.uniform(*SLOT_ASPECT_WH_RANGE)
                 slot_w = max(piece_w_px + 8, int(round(slot_h * aspect)))
             else:
-                # Wide piece — match width.
                 slot_w = max(piece_w_px + 8, int(round(piece_w_px / fill_frac)))
-                aspect = rng.uniform(*SLOT_ASPECT_WH_RANGE)   # w/h
+                aspect = rng.uniform(*SLOT_ASPECT_WH_RANGE)
                 slot_h = max(piece_h_px + 8, int(round(slot_w / aspect)))
 
         min_slot_w = piece.cols * cell_px + 8
@@ -246,10 +223,6 @@ def render_piece_sample(
     return canvas
 
 
-# ---------------------------------------------------------------------------
-# Batch generator
-# ---------------------------------------------------------------------------
-
 _PIECE_WEIGHTS = [PIECE_SAMPLE_WEIGHTS.get(p.name, 1.0) for p in PIECES]
 
 
@@ -259,15 +232,10 @@ def generate_batch(
     empty_fraction: float = 1 / NUM_CLASSES,
     clean_fraction: float = CLEAN_SAMPLE_FRACTION,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate (images, labels) on the fly.
+    """Generate ``(images, labels)`` on the fly.
 
-    Images: ``(batch_size, INPUT_SIZE, INPUT_SIZE, 3)`` uint8 BGR.
-    Labels: ``(batch_size,)`` int64 class ids in ``[0, NUM_CLASSES)``.
-
-    ``clean_fraction`` is the share of samples rendered with no photo-
-    realistic corruption (see ``render_piece_sample`` ``clean=True``).
-    Pieces are drawn according to ``PIECE_SAMPLE_WEIGHTS`` so historically-
-    confused classes (long bars, 5-cell L's) get oversampled.
+    Images are ``(batch_size, INPUT_SIZE, INPUT_SIZE, 3)`` uint8 BGR; labels
+    are int64 class ids. Pieces are drawn per ``PIECE_SAMPLE_WEIGHTS``.
     """
     images = np.empty((batch_size, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     labels = np.empty((batch_size,), dtype=np.int64)
@@ -281,10 +249,6 @@ def generate_batch(
         labels[i] = class_id_for(piece)
     return images, labels
 
-
-# ---------------------------------------------------------------------------
-# Parallel pre-generation
-# ---------------------------------------------------------------------------
 
 def _worker_chunk(args: tuple[int, int, float, float]) -> tuple[np.ndarray, np.ndarray]:
     seed, chunk_size, empty_fraction, clean_fraction = args

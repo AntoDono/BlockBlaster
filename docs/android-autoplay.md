@@ -163,6 +163,45 @@ and the PD overshoots. Each PD step is interpolated into
 `MOVE_SUBSTEPS` touch events `MOVE_SUBSTEP_MS` apart so the in-game
 drag follower renders continuously.
 
+### In-flight motion compensator
+
+End-to-end feedback latency (ADB capture → matchTemplate → next move
+command) is ~2-3 frames. Without bookkeeping, a single bogus
+measurement — e.g. the template matcher latching onto a row-clear glow
+blob inside the search window — sends the PD loop dumping multiple
+full-cell steps in a row before the next measurement corrects it. The
+finger then overshoots by exactly the sum of those in-flight commands,
+which is often enough to push the piece out of the search window
+entirely and lose the placement.
+
+The compensator removes already-commanded-but-not-yet-observed motion
+from the controller's error signal:
+
+```
+pending_dx, pending_dy   # finger px commanded but not yet reflected
+                         # in measured piece position
+
+each iter, after measurement:
+    obs_d = measured - prev_measured           # piece motion this frame
+    pending -= obs_d, clamped to original sign # noise can't flip sign
+    eff_err = err - pending                    # discount in-flight motion
+    dx, dy  = PD(eff_err)                      # control on effective error
+    pending += dx, dy                          # add new step to budget
+```
+
+Sign-clamped decay (`pending` never crosses zero from measurement
+noise) ensures we only credit motion in the direction we commanded —
+a jittery matcher can't artificially inflate `pending` and starve the
+controller. The off-board recovery override also zeroes `pending` on
+the axis it takes over, since recovery steps point toward the board
+centre rather than the target.
+
+Net effect: at most ~one cell of in-flight motion ever influences the
+loop. If a measurement glitches, subsequent steps shrink to zero
+until feedback catches up; once feedback resumes, `pending` decays and
+the PD picks up where it left off. Logged per iter as `eff=` and
+`pend=` next to the raw `err=`.
+
 ### Release criteria
 
 UP commits the placement, so the gate is conservative:

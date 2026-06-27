@@ -24,15 +24,17 @@ from torch.optim import Adam
 from tqdm import tqdm
 
 from blockblaster.piece_cnn import (
+    DEFAULT_DATA_DIR,
     DEFAULT_WEIGHT_PATH,
     NUM_CLASSES,
     PieceCNN,
+    load_real_dataset,
     pregenerate_dataset,
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-NUM_TRAIN_SAMPLES = 250_000     # synth examples for training
-NUM_VAL_SAMPLES   = 25_000      # held-out synth examples for validation
+NUM_TRAIN_SAMPLES = 2_500     # synth examples for training
+NUM_VAL_SAMPLES   = 2_000      # held-out synth examples for validation
 NUM_WORKERS       = max(1, (os.cpu_count() or 4) - 1)  # CPU procs for synth
 BATCH_SIZE        = 2048        # large — model is tiny, GPU is bored
 NUM_EPOCHS        = 20
@@ -40,11 +42,48 @@ LEARNING_RATE     = 1e-3
 WEIGHT_DECAY      = 1e-4
 TARGET_VAL_ACC    = 0.995       # stop early if reached
 
+# ── Real (collected) data ─────────────────────────────────────────────────────
+REAL_DATA_DIR  = DEFAULT_DATA_DIR  # data/pieces/<label>/<uuid>.png
+REAL_VAL_FRAC  = 0.15    # fraction of real crops held out for the real-val metric
+REAL_OVERSAMPLE = 50     # repeat each real train crop N× so it isn't drowned by synth
+REAL_SPLIT_SEED = 123    # deterministic real train/val split
+
 
 def _to_tensor(images_bgr: np.ndarray) -> torch.Tensor:
     """(N, H, W, 3) BGR uint8  →  (N, 3, H, W) float32 RGB in [0, 1]."""
     rgb = images_bgr[..., ::-1].astype(np.float32) / 255.0
     return torch.from_numpy(np.ascontiguousarray(rgb.transpose(0, 3, 1, 2)))
+
+
+def _load_real_split() -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
+    """Load collected crops and split into ``(tr_imgs, tr_lbls, val_imgs, val_lbls)``.
+
+    The train half is oversampled by ``REAL_OVERSAMPLE`` so it carries weight
+    against the much larger synthetic set. Returns empty arrays if no real data
+    is present, in which case training falls back to synth-only.
+    """
+    imgs, lbls = load_real_dataset(REAL_DATA_DIR)
+    n = len(imgs)
+    if n == 0:
+        empty_i = np.empty((0, *imgs.shape[1:]), dtype=imgs.dtype)
+        empty_l = np.empty((0,), dtype=lbls.dtype)
+        return empty_i, empty_l, empty_i.copy(), empty_l.copy()
+
+    rng  = np.random.default_rng(REAL_SPLIT_SEED)
+    perm = rng.permutation(n)
+    imgs, lbls = imgs[perm], lbls[perm]
+
+    n_val = max(1, int(round(n * REAL_VAL_FRAC))) if n > 1 else 0
+    val_imgs, val_lbls = imgs[:n_val], lbls[:n_val]
+    tr_imgs,  tr_lbls  = imgs[n_val:], lbls[n_val:]
+
+    if REAL_OVERSAMPLE > 1 and len(tr_imgs):
+        tr_imgs = np.repeat(tr_imgs, REAL_OVERSAMPLE, axis=0)
+        tr_lbls = np.repeat(tr_lbls, REAL_OVERSAMPLE, axis=0)
+
+    return tr_imgs, tr_lbls, val_imgs, val_lbls
 
 
 def _eval(
@@ -83,6 +122,22 @@ def main() -> None:
     val_imgs, val_lbls = pregenerate_dataset(
         NUM_VAL_SAMPLES, n_workers=NUM_WORKERS, seed=10**7, desc="    val pregen",
     )
+
+    # Mix in collected real crops: oversampled into the train set, with a held-out
+    # slice tracked as a separate "real val" accuracy.
+    real_tr_imgs, real_tr_lbls, real_val_imgs, real_val_lbls = _load_real_split()
+    n_real_tr  = len(real_tr_imgs)
+    n_real_val = len(real_val_imgs)
+    if n_real_tr or n_real_val:
+        n_unique_tr = n_real_tr // REAL_OVERSAMPLE if REAL_OVERSAMPLE > 1 else n_real_tr
+        print(f"[phase 1] real data: {n_unique_tr} train crops "
+              f"(×{REAL_OVERSAMPLE} = {n_real_tr}) + {n_real_val} val crops")
+        if n_real_tr:
+            train_imgs = np.concatenate([train_imgs, real_tr_imgs], axis=0)
+            train_lbls = np.concatenate([train_lbls, real_tr_lbls], axis=0)
+    else:
+        print(f"[phase 1] no real data found under {REAL_DATA_DIR} — synth only")
+
     print(f"[phase 1] dataset ready in {time.time() - t0:.1f}s "
           f"(RAM: {(train_imgs.nbytes + val_imgs.nbytes) / 1e6:.0f} MB)")
 
@@ -96,6 +151,14 @@ def main() -> None:
     val_x   = _to_tensor(val_imgs).pin_memory() if pin else _to_tensor(val_imgs)
     val_y   = torch.from_numpy(val_lbls).pin_memory() if pin else torch.from_numpy(val_lbls)
     del train_imgs, val_imgs   # free the uint8 staging copies
+
+    has_real_val = n_real_val > 0
+    if has_real_val:
+        real_val_x = _to_tensor(real_val_imgs)
+        real_val_y = torch.from_numpy(real_val_lbls)
+        if pin:
+            real_val_x = real_val_x.pin_memory()
+            real_val_y = real_val_y.pin_memory()
 
     # ── Phase 2: train ───────────────────────────────────────────────────
     print(f"\n[phase 2] training "
@@ -148,23 +211,34 @@ def main() -> None:
 
         train_acc = epoch_correct / n_train
         val_acc   = _eval(net, val_x, val_y, batch=BATCH_SIZE, device=device)
+        real_acc  = (
+            _eval(net, real_val_x, real_val_y, batch=BATCH_SIZE, device=device)
+            if has_real_val else None
+        )
         ep_time   = time.time() - ep_t0
 
+        # When real data is present, checkpoint on real-val accuracy — that's the
+        # metric we actually care about. Otherwise fall back to synth-val.
+        monitor = real_acc if has_real_val else val_acc
+
         flag = ""
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if monitor > best_acc:
+            best_acc = monitor
             torch.save(net.state_dict(), out_path)
             flag = "  ↳ saved"
 
+        real_str = f"  real_val_acc={real_acc:.4f}" if has_real_val else ""
         print(f"  Epoch {epoch:>2d}  loss={epoch_loss / n_batches:.4f}  "
-              f"train_acc={train_acc:.4f}  val_acc={val_acc:.4f}  "
+              f"train_acc={train_acc:.4f}  val_acc={val_acc:.4f}{real_str}  "
               f"({ep_time:.1f}s){flag}")
 
-        if val_acc >= TARGET_VAL_ACC:
-            print(f"[phase 2] hit target val_acc {TARGET_VAL_ACC}, stopping early")
+        if monitor >= TARGET_VAL_ACC:
+            metric = "real_val_acc" if has_real_val else "val_acc"
+            print(f"[phase 2] hit target {metric} {TARGET_VAL_ACC}, stopping early")
             break
 
-    print(f"\n[done] best val_acc={best_acc:.4f}  "
+    best_metric = "real_val_acc" if has_real_val else "val_acc"
+    print(f"\n[done] best {best_metric}={best_acc:.4f}  "
           f"total train time {time.time() - train_t0:.1f}s  "
           f"weights → {out_path}")
 

@@ -1,19 +1,4 @@
-"""Suggest the best next placement using a trained ValueNet.
-
-Wraps :func:`blockblaster.agent.policy.select_action` for the assist GUI.
-The advisor:
-
-  * loads weights from ``model.pt`` (or any path) at construction,
-  * accepts the *scanned* board grid + recognised queue (which may contain
-    ``None`` slots if recognition failed),
-  * returns the policy's chosen ``(slot, row, col)`` action plus a handle
-    on the chosen :class:`Piece`,
-  * caches the last suggestion by (board, queue piece-ids) so we don't
-    rerun beam search every frame.
-
-If the model fails to load, or no legal move exists, ``suggest()`` returns
-``None`` and ``last_error`` carries a human-readable reason.
-"""
+"""Greedy one-step placement suggester backed by a trained ValueNet."""
 
 from __future__ import annotations
 
@@ -25,10 +10,10 @@ import numpy as np
 import torch
 
 import param
-from blockblaster.agent.policy import select_action
 from blockblaster.game.board import Board
-from blockblaster.game.env import BlockBlastEnv
 from blockblaster.game.pieces import Piece
+from blockblaster.game.potential import board_potential
+from blockblaster.model.encoder import encode_state
 from blockblaster.model.value_net import ValueNet
 
 
@@ -40,8 +25,34 @@ class Suggestion:
     piece: Piece
 
 
+def _legal_positions(grid: np.ndarray, piece: Piece) -> list[tuple[int, int]]:
+    n = grid.shape[0]
+    pr, pc = piece.rows, piece.cols
+    if pr > n or pc > n:
+        return []
+    valid = np.ones((n - pr + 1, n - pc + 1), dtype=bool)
+    for dr, dc in piece.cells:
+        valid &= grid[dr : n - pr + 1 + dr, dc : n - pc + 1 + dc] == 0
+    rs, cs = np.where(valid)
+    return list(zip(rs.tolist(), cs.tolist()))
+
+
+def _place_and_clear(
+    grid: np.ndarray, piece: Piece, row: int, col: int
+) -> np.ndarray:
+    g = grid.copy()
+    for dr, dc in piece.cells:
+        g[row + dr, col + dc] = 1
+    full_rows = np.where(g.all(axis=1))[0]
+    full_cols = np.where(g.all(axis=0))[0]
+    if len(full_rows) or len(full_cols):
+        g[full_rows, :] = 0
+        g[:, full_cols] = 0
+    return g
+
+
 class Advisor:
-    """Loads a ValueNet checkpoint and produces placement suggestions."""
+    """Loads a ValueNet checkpoint and produces a single greedy suggestion."""
 
     def __init__(self, model_path: str | Path = "model.pt") -> None:
         self.model_path = Path(model_path)
@@ -50,10 +61,6 @@ class Advisor:
         self._cache_key: Optional[tuple] = None
         self._cache_value: Optional[Suggestion] = None
         self._load()
-
-    # ------------------------------------------------------------------
-    # Loading
-    # ------------------------------------------------------------------
 
     def _load(self) -> None:
         if not self.model_path.exists():
@@ -74,75 +81,73 @@ class Advisor:
             net.eval()
             self.net = net
             self.last_error = None
-        except Exception as exc:  # noqa: BLE001 — surface any load failure
+        except Exception as exc:  # noqa: BLE001
             self.net = None
             self.last_error = f"model load failed: {exc!r}"
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def suggest(
         self,
         board_grid: np.ndarray,
         queue: list[Optional[Piece]],
     ) -> Optional[Suggestion]:
-        """Return the policy's suggested placement, or ``None`` if unavailable.
-
-        Slots in ``queue`` that are ``None`` (already played, or unrecognised)
-        are filtered out before running the policy.  As long as at least one
-        piece is recognised we still produce a suggestion; the returned
-        ``Suggestion.slot`` indexes the *original* queue (not the filtered
-        list) so the GUI can highlight the right slot.
-        """
-        if self.net is None:
-            return None
-        if not queue:
+        """Return the best single (slot, row, col) by greedy ValueNet scoring."""
+        if self.net is None or not queue:
             return None
 
-        # Filter out None slots and remember each surviving piece's position
-        # in the original queue.
-        original_slots: list[int] = [i for i, p in enumerate(queue) if p is not None]
-        pieces: list[Piece] = [queue[i] for i in original_slots]
+        original_slots = [i for i, p in enumerate(queue) if p is not None]
+        pieces = [queue[i] for i in original_slots]
         if not pieces:
             return None
 
+        grid = board_grid.astype(np.int8, copy=False)
         cache_key = (
-            board_grid.tobytes(),
-            board_grid.shape,
+            grid.tobytes(),
+            grid.shape,
             tuple((i, p.piece_id) for i, p in zip(original_slots, pieces)),
         )
         if cache_key == self._cache_key:
             return self._cache_value
 
-        env = BlockBlastEnv.__new__(BlockBlastEnv)
-        env._rng = None  # type: ignore[attr-defined]  # select_action doesn't touch the rng
-        env.board = Board()
-        env.board.grid = board_grid.astype(np.int8).copy()
-        env.queue = list(pieces)
-        env.total_score = 0.0
-        env.steps = 0
+        # Build all candidate (slot_idx, row, col, next_grid) tuples.
+        candidates: list[tuple[int, int, int, np.ndarray]] = []
+        for slot_idx, piece in enumerate(pieces):
+            for r, c in _legal_positions(grid, piece):
+                candidates.append((slot_idx, r, c, _place_and_clear(grid, piece, r, c)))
 
-        if not env.legal_actions():
+        if not candidates:
             self._cache_key = cache_key
             self._cache_value = None
             return None
 
+        # Score V*(s') = V_F(s') + Phi(s') for each candidate.
+        board_obj = Board()
+        tensors = []
+        phis = []
+        for slot_idx, _, _, next_grid in candidates:
+            board_obj.grid = next_grid
+            remaining = [p for i, p in enumerate(pieces) if i != slot_idx]
+            tensors.append(encode_state(board_obj, remaining))
+            phis.append(board_potential(next_grid))
+
+        net_device = next(self.net.parameters()).device
         try:
-            slot_filtered, row, col = select_action(env, self.net, epsilon=0.0)
+            batch = torch.stack(tensors, dim=0).to(net_device)
+            values = self.net.predict(batch)
+            phi_t = torch.tensor(phis, dtype=values.dtype, device=values.device)
+            scores = (values + phi_t).tolist()
         except Exception as exc:  # noqa: BLE001
-            self.last_error = f"select_action failed: {exc!r}"
+            self.last_error = f"scoring failed: {exc!r}"
             self._cache_key = cache_key
             self._cache_value = None
             return None
 
-        # Map the filtered slot index back to the original queue
-        original_slot = original_slots[slot_filtered]
+        best = int(max(range(len(scores)), key=lambda i: scores[i]))
+        slot_idx, r, c, _ = candidates[best]
         suggestion = Suggestion(
-            slot=original_slot,
-            row=row,
-            col=col,
-            piece=pieces[slot_filtered],
+            slot=original_slots[slot_idx],
+            row=r,
+            col=c,
+            piece=pieces[slot_idx],
         )
         self._cache_key = cache_key
         self._cache_value = suggestion

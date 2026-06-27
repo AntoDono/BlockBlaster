@@ -22,17 +22,10 @@ DEFAULT_WEIGHT_PATH = Path("piece_cnn.pt")
 
 
 class PieceCNN(nn.Module):
-    """Convnet — ~3.6 M params, runs in <5 ms per crop on CPU, much faster on GPU.
+    """Small convnet (~3.6 M params, <5 ms/crop on CPU).
 
-    Two changes from the original 300 K model:
-
-    1. Pool only twice (96 → 48 → 24) instead of three times. Keeping a 24×24
-       feature map (was 12×12) doubles the spatial resolution available to
-       the head, so 5 stacked cells project to 5+ distinct horizontal /
-       vertical bins instead of getting squashed to 2-3.
-    2. Head keeps a 12×12 grid (was 4×4 → 8×8). Counting cells (4x1 vs 5x1)
-       needs ≥ 2× the count of bins per axis to be unambiguous; 12 bins
-       comfortably resolves any piece up to 5 cells long with margin.
+    Pools only twice (96 → 48 → 24) and keeps a 12×12 head grid so stacked
+    cells stay separable — counting 4x1 vs 5x1 needs enough spatial bins.
     """
 
     def __init__(self, num_classes: int = NUM_CLASSES) -> None:
@@ -52,15 +45,11 @@ class PieceCNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pool(F.relu(self.bn1(self.conv1(x))))   # 96 → 48
         x = self.pool(F.relu(self.bn2(self.conv2(x))))   # 48 → 24
-        x = F.relu(self.bn3(self.conv3(x)))               # 24 (no pool)
-        x = self.head_pool(x).flatten(1)                  # → (B, 96*12*12)
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.head_pool(x).flatten(1)
         x = F.relu(self.fc1(self.dropout(x)))
-        return self.fc2(x)                                # logits
+        return self.fc2(x)
 
-
-# ---------------------------------------------------------------------------
-# Image preprocessing
-# ---------------------------------------------------------------------------
 
 def preprocess_bgr(img_bgr: np.ndarray) -> torch.Tensor:
     """Convert a BGR uint8 image to the model's input tensor (C, H, W) float32."""
@@ -74,8 +63,7 @@ def preprocess_bgr(img_bgr: np.ndarray) -> torch.Tensor:
 
 def preprocess_batch(imgs_bgr: list[np.ndarray] | np.ndarray) -> torch.Tensor:
     """Stack a list/array of BGR uint8 images into a (B, C, H, W) float32 tensor."""
-    if isinstance(imgs_bgr, np.ndarray) and imgs_bgr.ndim == 4:
-        # Assumed (B, H, W, 3) uint8 BGR
+    if isinstance(imgs_bgr, np.ndarray) and imgs_bgr.ndim == 4:  # (B, H, W, 3) BGR
         if imgs_bgr.shape[1:3] != (INPUT_SIZE, INPUT_SIZE):
             imgs_bgr = np.stack([
                 cv2.resize(im, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
@@ -85,10 +73,6 @@ def preprocess_batch(imgs_bgr: list[np.ndarray] | np.ndarray) -> torch.Tensor:
         return torch.from_numpy(np.ascontiguousarray(rgb.transpose(0, 3, 1, 2)))
     return torch.stack([preprocess_bgr(im) for im in imgs_bgr])
 
-
-# ---------------------------------------------------------------------------
-# Inference helper
-# ---------------------------------------------------------------------------
 
 class PieceClassifier:
     """Stateful wrapper that loads weights and classifies slot crops."""

@@ -70,24 +70,12 @@ def draw_cell(
 ) -> None:
     """Draw one cell at pixel (x, y).
 
-    Parameters
-    ----------
-    gradient_bevel:
-        Smooth top→bottom value gradient instead of line-based bevel.
-        Matches the real game's look.
-    border_frac:
-        Border thickness as a fraction of the cell pitch.
-    border_color:
-        BGR colour for the outline.  Defaults to a darker shade of ``color``
-        (matching the real game); pass ``(0, 0, 0)`` for the classic black border.
-    rounded:
-        Render with rounded corners (clean / in-game look). The cell is
-        alpha-composited onto the existing canvas so background shows
-        through the corner cut-outs.
+    ``gradient_bevel`` uses a smooth top→bottom value ramp; ``border_color``
+    defaults to a darker shade of ``color``; ``rounded`` alpha-composites the
+    cell so the background shows through the corner cut-outs.
     """
     if size < 4:
         return
-    # Floor border at 1 px for very-thin (clean-mode) borders, 2 px otherwise.
     border_min = 1 if border_frac < 0.04 else 2
     border     = max(border_min, int(round(size * border_frac)))
     inset   = border
@@ -97,8 +85,7 @@ def draw_cell(
     fill_y1 = y + size - inset - 1
 
     if rounded:
-        # Build the whole cell (border + fill) in a local tile, then alpha-
-        # blit through a rounded mask so corners are cut against the bg.
+        # Build the cell in a local tile, then alpha-blit through a rounded mask.
         tile_h = tile_w = size
         if border_color is None:
             border_color = scale_color(color, BORDER_DARKEN_FACTOR)

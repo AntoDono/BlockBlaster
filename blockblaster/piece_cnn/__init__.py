@@ -16,6 +16,11 @@ from blockblaster.piece_cnn.model import (
     preprocess_batch,
     preprocess_bgr,
 )
+from blockblaster.piece_cnn.realdata import (
+    DEFAULT_DATA_DIR,
+    RealPieceStore,
+    load_real_dataset,
+)
 from blockblaster.piece_cnn.synth import (
     EMPTY_CLASS_ID,
     INPUT_SIZE,
@@ -29,6 +34,7 @@ from blockblaster.piece_cnn.synth import (
 )
 
 __all__ = [
+    "DEFAULT_DATA_DIR",
     "DEFAULT_WEIGHT_PATH",
     "EMPTY_CLASS_ID",
     "INPUT_SIZE",
@@ -36,8 +42,10 @@ __all__ = [
     "NUM_PIECES",
     "PieceCNN",
     "PieceClassifier",
+    "RealPieceStore",
     "class_id_for",
     "generate_batch",
+    "load_real_dataset",
     "piece_for_class",
     "pregenerate_dataset",
     "preprocess_batch",
