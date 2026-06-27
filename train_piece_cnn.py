@@ -33,7 +33,7 @@ from blockblaster.piece_cnn import (
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-NUM_TRAIN_SAMPLES = 2_500     # synth examples for training
+NUM_TRAIN_SAMPLES = 50_000     # synth examples for training
 NUM_VAL_SAMPLES   = 2_000      # held-out synth examples for validation
 NUM_WORKERS       = max(1, (os.cpu_count() or 4) - 1)  # CPU procs for synth
 BATCH_SIZE        = 2048        # large — model is tiny, GPU is bored
