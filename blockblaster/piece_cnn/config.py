@@ -8,7 +8,7 @@ from blockblaster.game.pieces import PIECES
 NUM_PIECES     = len(PIECES)
 EMPTY_CLASS_ID = NUM_PIECES
 NUM_CLASSES    = NUM_PIECES + 1
-INPUT_SIZE     = 96
+INPUT_SIZE     = 64
 
 # ── Slot canvas geometry ──────────────────────────────────────────────────────
 SLOT_HEIGHT_RANGE    = (220, 460)

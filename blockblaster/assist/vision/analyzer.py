@@ -46,21 +46,35 @@ class ReconSnapshot:
 
 class AnalysisWorker:
     _IDLE_SLEEP = 0.005
+    # A changed board must persist this many consecutive frames before it counts
+    # as a real change (debounces scan flicker during a drop / clear animation).
+    _STABLE_FRAMES = 2
 
     def __init__(
         self,
         device: Device,
         recognizer: PieceRecognizer,
         advisor: Advisor,
+        diff_tracker: Optional[object] = None,
     ) -> None:
         self._device     = device
         self._recognizer = recognizer
         self._advisor    = advisor
+        self._diff_tracker = diff_tracker
 
         self._lock     = threading.Lock()
         self._snap     = ReconSnapshot()
         self._running  = False
         self._thread: Optional[threading.Thread] = None
+
+        # Suggestion latch: a placement is held until the *board* changes, so a
+        # piece being lifted/dragged (which only changes the tray) never causes a
+        # premature re-suggest. The board change is debounced for stability.
+        self._held_suggestion: Optional[Suggestion] = None
+        self._held_board: Optional[np.ndarray] = None
+        self._cand_board: Optional[np.ndarray] = None
+        self._cand_count: int = 0
+        self._confirmed_board: Optional[np.ndarray] = None
 
     def start(self) -> None:
         if self._running:
@@ -83,9 +97,29 @@ class AnalysisWorker:
 
     def _loop(self) -> None:
         last_seen_id = -1
+        in_event = False
         while self._running:
             frame, frame_id = self._device.get_latest_with_id()
-            if frame is None or frame_id == last_seen_id:
+            if frame is None:
+                time.sleep(self._IDLE_SLEEP)
+                continue
+
+            # Pause analysis while a big-motion event (drop / clear animation) is
+            # in progress; the board is mid-transition and would scan garbage.
+            if self._diff_tracker is not None and self._diff_tracker.event_active(
+                time.monotonic()
+            ):
+                in_event = True
+                time.sleep(self._IDLE_SLEEP)
+                continue
+
+            # The instant the event clears, force a re-analysis of the current
+            # frame even if its id hasn't advanced.
+            if in_event:
+                in_event = False
+                last_seen_id = -1
+
+            if frame_id == last_seen_id:
                 time.sleep(self._IDLE_SLEEP)
                 continue
 
@@ -116,10 +150,7 @@ class AnalysisWorker:
                 piece_dets.append(PieceDetection(piece, p_elem.bbox, conf, cnn_input))
 
         queue      = [pd.piece for pd in piece_dets]
-        suggestion = (
-            self._advisor.suggest(board_grid, queue)
-            if any(p is not None for p in queue) else None
-        )
+        suggestion = self._resolve_suggestion(board_grid, queue)
 
         return ReconSnapshot(
             frame_id=frame_id,
@@ -129,3 +160,47 @@ class AnalysisWorker:
             pieces=piece_dets,
             suggestion=suggestion,
         )
+
+    def _resolve_suggestion(
+        self,
+        board_grid: np.ndarray,
+        queue: list[Optional[Piece]],
+    ) -> Optional[Suggestion]:
+        """Hold the current suggestion until the (debounced) board changes.
+
+        Lifting/dragging a piece only mutates the tray, not the board, so the
+        held placement survives the whole move and is only recomputed once the
+        piece actually lands (or a line clears) and the new board stabilises.
+        """
+        confirmed = self._update_confirmed_board(board_grid)
+        if confirmed is None:
+            return self._held_suggestion
+
+        board_changed = (
+            self._held_board is None
+            or not np.array_equal(confirmed, self._held_board)
+        )
+        if not board_changed:
+            return self._held_suggestion
+
+        if any(p is not None for p in queue):
+            new = self._advisor.suggest(confirmed, queue)
+            if new is not None:
+                self._held_suggestion = new
+                self._held_board = confirmed.copy()
+
+        return self._held_suggestion
+
+    def _update_confirmed_board(
+        self, board_grid: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """Return the latest board grid that has been stable for N frames."""
+        if self._cand_board is None or not np.array_equal(board_grid, self._cand_board):
+            self._cand_board = board_grid
+            self._cand_count = 1
+        else:
+            self._cand_count += 1
+
+        if self._cand_count >= self._STABLE_FRAMES:
+            self._confirmed_board = board_grid
+        return self._confirmed_board

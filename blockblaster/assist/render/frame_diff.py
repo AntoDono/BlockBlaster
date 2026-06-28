@@ -7,6 +7,8 @@ Draws the motion highlight produced by
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pygame
 
 from blockblaster.assist.render.phone import (
@@ -16,7 +18,14 @@ from blockblaster.assist.render.phone import (
     PANEL_BORDER,
     bgr_to_surface,
 )
-from blockblaster.assist.vision.frame_diff import FrameDiffTracker
+from blockblaster.assist.vision.frame_diff import (
+    FrameDiffTracker,
+    suggestion_cell_boxes,
+)
+
+# Suggestion outline colour — gold, kept distinct from the green recon ghost.
+SUGGEST_OUTLINE = (255, 200, 40)
+SUGGEST_OUTLINE_W = 3
 
 
 def draw_frame_diff_panel(
@@ -26,7 +35,13 @@ def draw_frame_diff_panel(
     now: float,
     small_font: pygame.font.Font,
 ) -> None:
-    """Draw the frame-difference panel."""
+    """Draw the frame-difference panel.
+
+    On top of the motion composite, the advisor's suggested placement is
+    outlined directly over the phone screen (mapped from board pixels). The
+    placement is read from the tracker, which holds the last one until it
+    changes, so the outline stays put even while the analyzer briefly drops it.
+    """
     pygame.draw.rect(screen, PANEL_BG,     rect, border_radius=10)
     pygame.draw.rect(screen, PANEL_BORDER, rect, width=2, border_radius=10)
 
@@ -46,11 +61,52 @@ def draw_frame_diff_panel(
                         content.centery - s.get_height() // 2))
         return
 
-    surf, _, bx, by = bgr_to_surface(composed, content)
+    surf, scale, bx, by = bgr_to_surface(composed, content)
     screen.blit(surf, (bx, by))
+
+    _draw_suggestion_outline(
+        screen, tracker.suggestion, tracker.board_bbox, scale, bx, by,
+    )
 
     if tracker.event_active(now):
         _draw_event_banner(screen, content, small_font)
+
+
+def _draw_suggestion_outline(
+    screen: pygame.Surface,
+    suggestion: Optional[object],
+    board_bbox: Optional[tuple[int, int, int, int]],
+    scale: float,
+    blit_x: int,
+    blit_y: int,
+) -> None:
+    """Trace a gold outline around the suggested placement footprint."""
+    boxes = suggestion_cell_boxes(suggestion, board_bbox)
+    if not boxes:
+        return
+
+    # Map each in-bounds piece cell (by board grid coords) to its screen rect.
+    occupied: dict[tuple[int, int], pygame.Rect] = {}
+    for (dr, dc), (x, y, w, h) in zip(suggestion.piece.cells, boxes):
+        rect = pygame.Rect(
+            blit_x + int(x * scale),
+            blit_y + int(y * scale),
+            max(1, int(w * scale)),
+            max(1, int(h * scale)),
+        )
+        occupied[(suggestion.row + dr, suggestion.col + dc)] = rect
+
+    # Draw only the perimeter: skip an edge when the adjacent grid cell is also
+    # part of the footprint, so internal grid lines stay hidden.
+    for (r, c), cell in occupied.items():
+        if (r, c - 1) not in occupied:
+            pygame.draw.line(screen, SUGGEST_OUTLINE, cell.topleft, cell.bottomleft, SUGGEST_OUTLINE_W)
+        if (r, c + 1) not in occupied:
+            pygame.draw.line(screen, SUGGEST_OUTLINE, cell.topright, cell.bottomright, SUGGEST_OUTLINE_W)
+        if (r - 1, c) not in occupied:
+            pygame.draw.line(screen, SUGGEST_OUTLINE, cell.topleft, cell.topright, SUGGEST_OUTLINE_W)
+        if (r + 1, c) not in occupied:
+            pygame.draw.line(screen, SUGGEST_OUTLINE, cell.bottomleft, cell.bottomright, SUGGEST_OUTLINE_W)
 
 
 _EVENT_BG     = (200, 40, 40)

@@ -22,33 +22,30 @@ DEFAULT_WEIGHT_PATH = Path("piece_cnn.pt")
 
 
 class PieceCNN(nn.Module):
-    """Small convnet (~3.6 M params, <5 ms/crop on CPU).
+    """Shallow, resolution-preserving classifier.
 
-    Pools only twice (96 → 48 → 24) and keeps a 12×12 head grid so stacked
-    cells stay separable — counting 4x1 vs 5x1 needs enough spatial bins.
+    Counting cells (1x4 vs 1x5, L-shapes vs bars) depends on the thin gaps
+    *between* cells. Pooling/averaging destroys that signal, so this net never
+    downsamples: two stride-1 conv layers extract local edge/gap features at
+    full ``INPUT_SIZE`` resolution, then a single linear head reads the whole
+    spatial map. Simpler and far more accurate at counting than a deep, pooled
+    stack.
     """
 
-    def __init__(self, num_classes: int = NUM_CLASSES) -> None:
+    def __init__(
+        self, num_classes: int = NUM_CLASSES, size: int = INPUT_SIZE
+    ) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(3,  32, 3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.conv3 = nn.Conv2d(64, 96, 3, padding=1)
-        self.bn1   = nn.BatchNorm2d(32)
-        self.bn2   = nn.BatchNorm2d(64)
-        self.bn3   = nn.BatchNorm2d(96)
-        self.pool  = nn.MaxPool2d(2)
-        self.head_pool = nn.AdaptiveAvgPool2d((12, 12))
-        self.dropout   = nn.Dropout(0.2)
-        self.fc1       = nn.Linear(96 * 12 * 12, 256)
-        self.fc2       = nn.Linear(256, num_classes)
+        self.conv1 = nn.Conv2d(3,  16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 16, 3, padding=1)
+        self.dropout = nn.Dropout(0.2)
+        self.fc      = nn.Linear(16 * size * size, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))   # 96 → 48
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))   # 48 → 24
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = self.head_pool(x).flatten(1)
-        x = F.relu(self.fc1(self.dropout(x)))
-        return self.fc2(x)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.dropout(x.flatten(1))
+        return self.fc(x)
 
 
 def preprocess_bgr(img_bgr: np.ndarray) -> torch.Tensor:

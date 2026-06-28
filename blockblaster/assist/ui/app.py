@@ -60,7 +60,13 @@ def run(
         device = IosReadOnlyDevice()
     device.start()
 
-    analyzer = AnalysisWorker(device=device, recognizer=recognizer, advisor=advisor)
+    diff_tracker = FrameDiffTracker()
+    analyzer = AnalysisWorker(
+        device=device,
+        recognizer=recognizer,
+        advisor=advisor,
+        diff_tracker=diff_tracker,
+    )
     analyzer.start()
 
     state = AppState(platform=platform)
@@ -69,7 +75,6 @@ def run(
     adb_count        = 0
     adb_fps          = 0.0
     prev_frame_id    = -1
-    diff_tracker     = FrameDiffTracker()
 
     running = True
     while running:
@@ -93,6 +98,7 @@ def run(
                 running = False
 
         snap = analyzer.snapshot()
+        diff_tracker.set_suggestion(snap.suggestion, snap.board_bbox)
 
         screen.fill(BG_COLOR)
 
