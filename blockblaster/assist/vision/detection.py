@@ -36,7 +36,8 @@ import numpy as np
 BG_PATCH_H        = 5      # px; height of the bottom strip sampled for bg colour
 BG_PATCH_W        = 100    # px; width (centred) of the bottom strip sampled for bg
 BG_DIFF_THRESHOLD = 60     # min sum-of-abs BGR diff from bg to count as foreground
-CLOSE_KERNEL      = 9      # px; fuses board cells & piece cells into solid blobs
+CLOSE_KERNEL      = 17     # px; fuses board cells & piece cells (incl. corner-
+                           # touching S/Z/diagonal cells) into one solid blob
 OPEN_KERNEL       = 3      # px; removes salt noise / single-pixel speckle
 MIN_AREA_FRAC     = 0.0008 # min blob area as a fraction of the full frame
 MIN_DIM_FRAC      = 0.02   # min blob width AND height as a fraction of frame dim
@@ -97,12 +98,18 @@ def foreground_mask(frame_bgr: np.ndarray) -> np.ndarray:
         k = cv2.getStructuringElement(cv2.MORPH_RECT, (OPEN_KERNEL, OPEN_KERNEL))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
     if CLOSE_KERNEL > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (CLOSE_KERNEL, CLOSE_KERNEL))
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CLOSE_KERNEL, CLOSE_KERNEL))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     return mask
 
 
 CACHED_BOARD: Optional[Element] = None
+
+
+def reset_board_cache() -> None:
+    """Forget the cached board so the next detection re-finds it from scratch."""
+    global CACHED_BOARD
+    CACHED_BOARD = None
 
 
 def detect_interactables(

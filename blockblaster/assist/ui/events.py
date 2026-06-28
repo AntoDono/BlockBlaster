@@ -18,21 +18,33 @@ def dispatch_event(event: pygame.event.Event, *, state: AppState) -> bool:
     if event.type == pygame.QUIT:
         return False
     if event.type == pygame.KEYDOWN:
-        return _handle_keydown(event)
+        return _handle_keydown(event, state)
     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
         action = _hit_test_chips(event.pos, state)
         if action == "quit":
             return False
         if action == "screenshot":
             _save_screenshot()
+        if action == "autoplay":
+            state.autoplay_on = not state.autoplay_on
+        if action == "debug":
+            state.show_debug = not state.show_debug
+        if action == "recalibrate":
+            state.recalibrate_request = True
     return True
 
 
-def _handle_keydown(event: pygame.event.Event) -> bool:
+def _handle_keydown(event: pygame.event.Event, state: AppState) -> bool:
     if event.key in (pygame.K_q, pygame.K_ESCAPE):
         return False
     if event.key == pygame.K_s:
         _save_screenshot()
+    if event.key == pygame.K_a:
+        state.autoplay_on = not state.autoplay_on
+    if event.key == pygame.K_d:
+        state.show_debug = not state.show_debug
+    if event.key == pygame.K_r:
+        state.recalibrate_request = True
     return True
 
 

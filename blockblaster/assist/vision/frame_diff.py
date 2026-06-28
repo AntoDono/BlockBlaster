@@ -18,7 +18,7 @@ import numpy as np
 # Pixels whose blurred grayscale difference exceeds this are treated as moving.
 DIFF_THRESHOLD = 18
 # How dark the original frame is shown underneath the highlight (0..1).
-DIM_FACTOR = 0.30
+DIM_FACTOR = 0.65
 # Highlight tint applied to moving pixels (BGR) — warm amber.
 HIGHLIGHT_BGR = np.array([60, 230, 255], dtype=np.float32)
 # Seconds the latest motion snapshot keeps being highlighted after it occurs.

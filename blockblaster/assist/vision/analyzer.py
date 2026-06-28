@@ -15,6 +15,7 @@ from blockblaster.assist.vision.detection import (
     Element,
     detect_interactables,
     estimate_background_bgr,
+    reset_board_cache,
     split_roles,
 )
 from blockblaster.assist.vision.piece_recognizer import PieceRecognizer, pad_to_slot
@@ -46,9 +47,7 @@ class ReconSnapshot:
 
 class AnalysisWorker:
     _IDLE_SLEEP = 0.005
-    # A changed board must persist this many consecutive frames before it counts
-    # as a real change (debounces scan flicker during a drop / clear animation).
-    _STABLE_FRAMES = 2
+    _STABLE_FRAMES = 10
 
     def __init__(
         self,
@@ -67,14 +66,19 @@ class AnalysisWorker:
         self._running  = False
         self._thread: Optional[threading.Thread] = None
 
-        # Suggestion latch: a placement is held until the *board* changes, so a
-        # piece being lifted/dragged (which only changes the tray) never causes a
-        # premature re-suggest. The board change is debounced for stability.
+        # Suggestion latch keyed on the combined (board, queue) state, debounced
+        # for stability. A dragged piece keeps the board changing every frame so
+        # the state never confirms (suggestion held, no flicker); once a
+        # placement settles OR a new piece set is dealt, the state confirms and
+        # the suggestion is recomputed — so it never points at a stale piece.
         self._held_suggestion: Optional[Suggestion] = None
         self._held_board: Optional[np.ndarray] = None
+        self._held_queue: Optional[tuple] = None
         self._cand_board: Optional[np.ndarray] = None
+        self._cand_queue: Optional[tuple] = None
         self._cand_count: int = 0
         self._confirmed_board: Optional[np.ndarray] = None
+        self._confirmed_queue: Optional[tuple] = None
 
     def start(self) -> None:
         if self._running:
@@ -94,6 +98,26 @@ class AnalysisWorker:
     def snapshot(self) -> ReconSnapshot:
         with self._lock:
             return self._snap
+
+    def recalibrate(self) -> None:
+        """Drop all latched state so the board + suggestion are re-derived fresh.
+
+        Clears the held suggestion, the confirmed/candidate board, and the
+        advisor cache, so the next frame is analysed from scratch (e.g. after a
+        manual board change or a detection that drifted).
+        """
+        self._held_suggestion = None
+        self._held_board = None
+        self._held_queue = None
+        self._cand_board = None
+        self._cand_queue = None
+        self._cand_count = 0
+        self._confirmed_board = None
+        self._confirmed_queue = None
+        self._advisor._cache_key = None
+        self._advisor._cache_value = None
+        reset_board_cache()  # force the board (interactables) to be re-detected
+        print("[analyzer] recalibrated — board/suggestion/board-cache cleared")
 
     def _loop(self) -> None:
         last_seen_id = -1
@@ -166,41 +190,55 @@ class AnalysisWorker:
         board_grid: np.ndarray,
         queue: list[Optional[Piece]],
     ) -> Optional[Suggestion]:
-        """Hold the current suggestion until the (debounced) board changes.
+        """Hold the suggestion until the (debounced) board *or* queue changes.
 
-        Lifting/dragging a piece only mutates the tray, not the board, so the
-        held placement survives the whole move and is only recomputed once the
-        piece actually lands (or a line clears) and the new board stabilises.
+        A dragged piece keeps the board scan changing every frame, so the state
+        never stabilises and the held placement survives the whole move. Once a
+        placement settles or a new piece set is dealt, the confirmed state
+        differs from what the suggestion was computed against → recompute. This
+        also stops the suggestion from referencing a stale/absent piece.
         """
-        confirmed = self._update_confirmed_board(board_grid)
+        queue_ids = tuple(p.piece_id if p is not None else None for p in queue)
+        confirmed = self._update_confirmed_state(board_grid, queue_ids)
         if confirmed is None:
             return self._held_suggestion
+        cboard, cqueue = confirmed
 
-        board_changed = (
+        changed = (
             self._held_board is None
-            or not np.array_equal(confirmed, self._held_board)
+            or self._held_queue != cqueue
+            or not np.array_equal(cboard, self._held_board)
         )
-        if not board_changed:
+        if not changed:
             return self._held_suggestion
 
         if any(p is not None for p in queue):
-            new = self._advisor.suggest(confirmed, queue)
+            new = self._advisor.suggest(cboard, queue)
             if new is not None:
                 self._held_suggestion = new
-                self._held_board = confirmed.copy()
+                self._held_board = cboard.copy()
+                self._held_queue = cqueue
 
         return self._held_suggestion
 
-    def _update_confirmed_board(
-        self, board_grid: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """Return the latest board grid that has been stable for N frames."""
-        if self._cand_board is None or not np.array_equal(board_grid, self._cand_board):
+    def _update_confirmed_state(
+        self, board_grid: np.ndarray, queue_ids: tuple,
+    ) -> Optional[tuple[np.ndarray, tuple]]:
+        """Return the (board, queue) state once stable for N consecutive frames."""
+        if (
+            self._cand_board is None
+            or self._cand_queue != queue_ids
+            or not np.array_equal(board_grid, self._cand_board)
+        ):
             self._cand_board = board_grid
+            self._cand_queue = queue_ids
             self._cand_count = 1
         else:
             self._cand_count += 1
 
         if self._cand_count >= self._STABLE_FRAMES:
             self._confirmed_board = board_grid
-        return self._confirmed_board
+            self._confirmed_queue = queue_ids
+        if self._confirmed_board is None:
+            return None
+        return self._confirmed_board, self._confirmed_queue
