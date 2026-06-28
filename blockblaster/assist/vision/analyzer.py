@@ -11,14 +11,14 @@ import cv2
 import numpy as np
 
 from blockblaster.assist.advisor import Advisor, Suggestion
-from blockblaster.assist.detection import (
+from blockblaster.assist.vision.detection import (
     Element,
     detect_interactables,
     estimate_background_bgr,
     split_roles,
 )
-from blockblaster.assist.piece_recognizer import PieceRecognizer, pad_to_slot
-from blockblaster.assist.scanner import BOARD_SIZE, scan_board
+from blockblaster.assist.vision.piece_recognizer import PieceRecognizer, pad_to_slot
+from blockblaster.assist.vision.scanner import BOARD_SIZE, scan_board
 from blockblaster.control.device import Device
 from blockblaster.game.pieces import Piece
 from blockblaster.piece_cnn.config import INPUT_SIZE

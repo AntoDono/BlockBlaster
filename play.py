@@ -27,7 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
 
-    from blockblaster.assist.app import run
+    from blockblaster.assist.ui.app import run
 
     if args.platform == "ios":
         run(platform="ios")

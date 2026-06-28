@@ -12,8 +12,8 @@ from typing import Optional
 
 import pygame
 
-from blockblaster.assist.analyzer import PieceDetection, ReconSnapshot
-from blockblaster.assist.render_phone import (
+from blockblaster.assist.vision.analyzer import PieceDetection, ReconSnapshot
+from blockblaster.assist.render.phone import (
     DIM_TEXT,
     LABEL_COL,
     PANEL_BG,

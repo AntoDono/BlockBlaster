@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pygame
 
-from blockblaster.assist.detection import Element, annotate
+from blockblaster.assist.vision.detection import Element, annotate
 
 PANEL_BG       = (20, 20, 30)
 PANEL_BORDER   = (55, 55, 75)

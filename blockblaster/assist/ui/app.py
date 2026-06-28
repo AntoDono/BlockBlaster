@@ -8,22 +8,25 @@ from typing import Optional
 import pygame
 
 from blockblaster.assist.advisor import Advisor
-from blockblaster.assist.analyzer import AnalysisWorker
-from blockblaster.assist.app_events import dispatch_event
-from blockblaster.assist.app_overlay import draw_controls_panel
-from blockblaster.assist.app_state import AppState
-from blockblaster.assist.layout import (
+from blockblaster.assist.vision.analyzer import AnalysisWorker
+from blockblaster.assist.ui.events import dispatch_event
+from blockblaster.assist.ui.overlay import draw_controls_panel
+from blockblaster.assist.ui.state import AppState
+from blockblaster.assist.ui.layout import (
     BG_COLOR,
     CNN_DEBUG_RECT,
     CONTROLS_RECT,
+    FRAME_DIFF_RECT,
     PHONE_RECT,
     RECON_RECT,
     STATUS_RECT,
     make_window,
 )
-from blockblaster.assist.piece_recognizer import PieceRecognizer
+from blockblaster.assist.vision.frame_diff import FrameDiffTracker
+from blockblaster.assist.vision.piece_recognizer import PieceRecognizer
 from blockblaster.assist.render import (
     draw_cnn_debug_panel,
+    draw_frame_diff_panel,
     draw_phone_panel,
     draw_recon_panel,
     draw_status_bar,
@@ -66,17 +69,19 @@ def run(
     adb_count        = 0
     adb_fps          = 0.0
     prev_frame_id    = -1
+    diff_tracker     = FrameDiffTracker()
 
     running = True
     while running:
         frame, frame_id = device.get_latest_with_id()
+        now = time.monotonic()
         if frame is not None:
             state.frame_h, state.frame_w = frame.shape[:2]
             if frame_id != prev_frame_id:
                 adb_count    += 1
                 prev_frame_id = frame_id
+                diff_tracker.observe(frame, now)
 
-        now     = time.monotonic()
         elapsed = now - adb_window_start
         if elapsed >= 1.0:
             adb_fps          = adb_count / elapsed
@@ -113,6 +118,14 @@ def run(
             screen,
             rect=CNN_DEBUG_RECT,
             snap=snap,
+            small_font=small_font,
+        )
+
+        draw_frame_diff_panel(
+            screen,
+            rect=FRAME_DIFF_RECT,
+            tracker=diff_tracker,
+            now=now,
             small_font=small_font,
         )
 

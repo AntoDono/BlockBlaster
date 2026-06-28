@@ -19,8 +19,8 @@ Pipeline
 
 Run it directly to visualise what gets detected::
 
-    uv run python -m blockblaster.assist.detection --image shot.png
-    uv run python -m blockblaster.assist.detection --android [--serial SERIAL]
+    uv run python -m blockblaster.assist.vision.detection --image shot.png
+    uv run python -m blockblaster.assist.vision.detection --android [--serial SERIAL]
 """
 
 from __future__ import annotations

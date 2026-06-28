@@ -13,13 +13,13 @@ from typing import Optional
 
 import pygame
 
-from blockblaster.assist.detection import (
+from blockblaster.assist.vision.detection import (
     detect_interactables,
     estimate_background_bgr,
     split_roles,
 )
-from blockblaster.assist.piece_recognizer import PieceRecognizer, pad_to_slot
-from blockblaster.assist.render_phone import bgr_to_surface, draw_phone_panel
+from blockblaster.assist.vision.piece_recognizer import PieceRecognizer, pad_to_slot
+from blockblaster.assist.render.phone import bgr_to_surface, draw_phone_panel
 from blockblaster.control.device import Device
 from blockblaster.game.pieces import PIECES
 from blockblaster.gui.render import PIECE_COLORS, draw_piece_preview

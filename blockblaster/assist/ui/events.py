@@ -8,7 +8,7 @@ from typing import Optional
 
 import pygame
 
-from blockblaster.assist.app_state import AppState
+from blockblaster.assist.ui.state import AppState
 
 _SCREENSHOTS_DIR = Path(__file__).resolve().parents[2] / "screenshots"
 

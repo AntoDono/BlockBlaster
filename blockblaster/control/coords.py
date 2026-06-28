@@ -1,6 +1,6 @@
 """Pixel-coordinate helpers: calibration boxes → screen pixel centres.
 
-All inputs are :class:`~blockblaster.assist.calibration.CalibrationBox`
+All inputs are :class:`~blockblaster.assist.vision.calibration.CalibrationBox`
 instances (stored in *original frame pixels*).  Returned coordinates are
 also in frame pixels so they can be passed directly to
 :meth:`~blockblaster.control.device.Device.swipe`.
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from blockblaster.assist.calibration import CalibrationBox
+from blockblaster.assist.vision.calibration import CalibrationBox
 from blockblaster.game.pieces import Piece
 
 

@@ -1,6 +1,6 @@
 """Public re-export surface for assist GUI rendering."""
 
-from blockblaster.assist.render_phone import (  # noqa: F401
+from blockblaster.assist.render.phone import (  # noqa: F401
     DEVICE_ERR_COL,
     DEVICE_OK_COL,
     DIM_TEXT,
@@ -16,5 +16,6 @@ from blockblaster.assist.render_phone import (  # noqa: F401
     draw_phone_panel,
     draw_status_bar,
 )
-from blockblaster.assist.render_recon import draw_recon_panel  # noqa: F401
-from blockblaster.assist.render_cnn_debug import draw_cnn_debug_panel  # noqa: F401
+from blockblaster.assist.render.recon import draw_recon_panel  # noqa: F401
+from blockblaster.assist.render.cnn_debug import draw_cnn_debug_panel  # noqa: F401
+from blockblaster.assist.render.frame_diff import draw_frame_diff_panel  # noqa: F401

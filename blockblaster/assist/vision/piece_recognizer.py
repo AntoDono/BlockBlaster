@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from blockblaster.assist.piece_mask import (
+from blockblaster.assist.vision.piece_mask import (
     MAX_CELL_RATIO,
     MIN_BBOX_DIM,
     MIN_FILL_FRACTION,
