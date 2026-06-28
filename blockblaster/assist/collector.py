@@ -62,9 +62,6 @@ class CollectorApp:
         self._device = device
         self._store = store
         self._recognizer = PieceRecognizer()
-        cnn = getattr(self._recognizer, "_cnn", None)
-        if cnn is not None and getattr(cnn, "is_ready", False):
-            cnn.confidence_threshold = 0.0
 
         self._crops: list = []
         self._labels: list[Optional[str]] = []

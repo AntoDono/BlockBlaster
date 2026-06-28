@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from blockblaster.piece_cnn.synth import (
+    EMPTY_CLASS_ID,
     INPUT_SIZE,
     NUM_CLASSES,
     piece_for_class,
@@ -78,11 +79,14 @@ class PieceClassifier:
         self,
         weight_path: str | Path = DEFAULT_WEIGHT_PATH,
         device: str | torch.device = "cpu",
-        confidence_threshold: float = 0.55,
+        allow_empty: bool = False,
     ) -> None:
         self.weight_path = Path(weight_path)
         self.device = torch.device(device)
-        self.confidence_threshold = confidence_threshold
+        # When False (default), the EMPTY class is never predicted: callers only
+        # feed crops where a piece was already detected, so the CNN always
+        # returns its best *piece* guess. Set True to let it report "empty".
+        self.allow_empty = allow_empty
         self.net: Optional[PieceCNN] = None
         self.last_error: Optional[str] = None
         self._load()
@@ -112,19 +116,22 @@ class PieceClassifier:
         self,
         slot_crops: list[np.ndarray],
     ) -> list[tuple[Optional[Piece], float]]:
-        """Classify a list of slot crops; return (piece_or_None, confidence) per slot."""
+        """Classify slot crops; return ``(piece_or_None, confidence)`` per slot.
+
+        Unless ``allow_empty`` is set, the EMPTY class is excluded from the
+        argmax — callers only feed crops where a piece was already detected, so
+        the CNN always returns its best *piece* guess. Confidence is still
+        returned for downstream gating / closed-loop verification.
+        """
         if self.net is None or not slot_crops:
             return [(None, 0.0)] * len(slot_crops)
         batch = preprocess_batch(slot_crops).to(self.device)
         logits = self.net(batch)
         probs  = F.softmax(logits, dim=1).cpu().numpy()
+        if not self.allow_empty:
+            probs[:, EMPTY_CLASS_ID] = -1.0  # a piece is present; never pick "empty"
         out: list[tuple[Optional[Piece], float]] = []
         for row in probs:
             cid = int(row.argmax())
-            conf = float(row[cid])
-            piece = piece_for_class(cid)
-            if conf < self.confidence_threshold:
-                out.append((None, conf))
-            else:
-                out.append((piece, conf))
+            out.append((piece_for_class(cid), float(row[cid])))
         return out
