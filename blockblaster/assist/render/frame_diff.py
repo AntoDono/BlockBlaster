@@ -48,6 +48,9 @@ _STATUS_COLORS = {
     "LOCKED":       ((30, 130, 70), (220, 255, 230)),
     "SEARCHING":    ((60, 60, 80), (200, 200, 220)),
     "TRAVELING":    ((30, 70, 110), (210, 235, 255)),
+    "AREA GROW":    ((30, 130, 70), (220, 255, 230)),
+    "ROW CLEAR":    ((120, 90, 30), (255, 245, 210)),
+    "OFF BOARD":    ((150, 70, 20), (255, 230, 200)),
 }
 
 
@@ -78,7 +81,16 @@ def draw_frame_diff_panel(
 
     if servo_debug is not None:
         sc_col = (80, 240, 120) if servo_debug.locked else _DBG_MEASURED
-        score_lbl = small_font.render(f"s={servo_debug.score:.2f}", True, sc_col)
+        hdr = f"s={servo_debug.score:.2f}"
+        if (
+            servo_debug.initial_area_px > 0
+            and servo_debug.current_area_px > 0
+        ):
+            ratio = servo_debug.current_area_px / servo_debug.initial_area_px
+            hdr += f" a={ratio:.2f}×"
+        elif servo_debug.initial_area_px > 0:
+            hdr += f" a₀={servo_debug.initial_area_px}"
+        score_lbl = small_font.render(hdr, True, sc_col)
         screen.blit(score_lbl, (rect.x + 10 + lbl.get_width() + 10, rect.y + 8))
 
     content = panel_content_rect(rect)

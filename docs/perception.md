@@ -48,7 +48,12 @@ No pooling anywhere. Counting cells (1x4 vs 1x5, L vs bar) depends on the thin g
 
 ## 4 · Advisor — [`assist/advisor.py`](../blockblaster/assist/advisor.py)
 
-Loads the trained `ValueNet` champion and exposes `suggest(board_grid, queue) → Suggestion(slot, row, col, piece)`. It enumerates every legal placement of every queued piece, scores each resulting board as `V*(s') = V_F(s') + Φ(s')` (a greedy one-step lookahead), and returns the argmax. Results are cached on `(board_grid, queue)` so an unchanged scene doesn't re-run the net.
+Loads the trained `ValueNet` champion and exposes `suggest(board_grid, queue) → Suggestion(slot, row, col, piece)`. The advisor uses the same 3-piece lookahead as the training policy (shared via [`game/lookahead.py`](../blockblaster/game/lookahead.py)): for every distinct ordering of the tray it simulates each candidate placement with row/column clears and scores the resulting sequence as `r₀ + γ·r₁ + γ²·r₂ + γ³·V*(s₃)`, where `r_k` is the immediate placement-plus-clear reward and `V*(s) = V_F(s) + Φ(s)`.
+Selection is **feasibility-first**:
+1. **Primary** — a first move is *safe* if at least one continuation places all three tray pieces. If any safe first move exists, only safe moves are considered and the best one wins by total discounted score.
+2. **Tie-break** — within the safe pool, the discounted step rewards and `V*` of the leaf jointly pick the winner (so clearing a row inside the 3-piece window is rewarded the same way it is during training).
+3. **Fallback** — when every first move forces a game-over within the 3-piece window, the advisor still returns the best-scoring terminal path (best-of-a-bad-situation).
+On sparse boards (every tray piece has many legal positions) feasibility is trivially satisfied and the call uses the same `BEAM_WIDTH` beam the training policy does; on cramped boards every distinct first move is retained at the top of the search so the only feasible move is never pruned. Results are cached on `(board_grid, queue)` so an unchanged scene doesn't re-run the net.
 
 ## 5 · Latching & gating — [`analyzer.py`](../blockblaster/assist/vision/analyzer.py)
 

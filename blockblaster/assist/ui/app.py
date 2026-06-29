@@ -49,6 +49,33 @@ def _suggestion_key(sug: Suggestion) -> tuple[int, int, int, int]:
     return (sug.slot, sug.row, sug.col, sug.piece.piece_id)
 
 
+def _format_plan(sug: Suggestion) -> str:
+    """Render the lookahead plan as ``slot=S pid=PID@(r,c)`` chained by ``→``."""
+    if not sug.plan:
+        return (
+            f"slot={sug.slot} pid={sug.piece.piece_id}"
+            f"@({sug.row},{sug.col})"
+        )
+    parts = [
+        f"slot={step.slot} pid={step.piece.piece_id}@({step.row},{step.col})"
+        for step in sug.plan
+    ]
+    tag = "terminal" if sug.terminal else "safe"
+    return f"{' → '.join(parts)}  [{tag} score={sug.score:.2f}]"
+
+
+def _log_new_plan(state: AppState, sug: Optional[Suggestion]) -> None:
+    """Emit a ``[plan]`` log line the first time we see each distinct suggestion."""
+    if sug is None:
+        state.logged_plan_key = None
+        return
+    key = _suggestion_key(sug)
+    if key == state.logged_plan_key:
+        return
+    state.logged_plan_key = key
+    append_log(state.log_lines, f"[plan] {_format_plan(sug)}")
+
+
 def _recalibrate(
     analyzer: AnalysisWorker,
     state: AppState,
@@ -61,6 +88,7 @@ def _recalibrate(
     analyzer.reset_debounce()
     diff_tracker.clear_suggestion()
     diff_tracker.clear_event()
+    state.logged_plan_key = None
     if clear_board_override:
         state.board_override = None
 
@@ -206,7 +234,7 @@ def _maybe_dispatch_servo(device: Device, state: AppState, snap, analyzer: Analy
                 on_debug=_on_debug,
                 on_log=_on_log,
             )
-            append_log(state.log_lines, f"[auto] servo: {'ok' if ok else 'FAIL'}")
+            append_log(state.log_lines, f"[auto] servo: {'ok (recon)' if ok else 'FAIL'}")
         except Exception as exc:  # noqa: BLE001
             append_log(state.log_lines, f"[auto] servo crashed: {exc!r}")
         finally:
@@ -303,6 +331,7 @@ def run(
 
         snap = analyzer.snapshot()
         diff_tracker.set_suggestion(snap.suggestion, snap.board_bbox)
+        _log_new_plan(state, snap.suggestion)
 
         if state.reset_analysis_request:
             state.reset_analysis_request = False

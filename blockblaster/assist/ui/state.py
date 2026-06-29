@@ -25,6 +25,9 @@ class AppState:
     auto_next_after: float = 0.0
     await_fresh_suggestion: bool = False
     placed_suggestion_key: Optional[tuple[int, int, int, int]] = None
+    # Last suggestion we already wrote a [plan] line for; reset to None on
+    # recalibrate so the next stable plan is re-logged.
+    logged_plan_key: Optional[tuple[int, int, int, int]] = None
     show_debug: bool = False
     servo_debug: Optional[ServoDebug] = None
     reset_analysis_request: bool = False

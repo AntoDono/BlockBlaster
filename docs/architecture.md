@@ -66,7 +66,7 @@ control/
   android_screenrecord.py / android_adb.py   capture + tap/swipe backends
   scrcpy_control.py    persistent scrcpy v1.20 touch session (servo gestures)
   ios_readonly.py      iOS mirror (read-only)
-  servo.py             closed-loop PD placement
+  servo/               closed-loop PD placement (place, tracking, geometry, …)
 ```
 
 Flow: `play.py` → `assist/ui/app.run`. The UI loop pulls frames from a `control.Device`, a background `assist/vision/analyzer.AnalysisWorker` detects the board + tray pieces and asks `assist/advisor.Advisor` for a `Suggestion`, and the panels render it. Pressing **A** runs `control/servo.place` on a worker thread to execute the suggestion on-device. See [perception.md](perception.md), [assist-gui.md](assist-gui.md), [visual-servo.md](visual-servo.md), [control-stack.md](control-stack.md).

@@ -2,7 +2,7 @@
 
 [← back to README](../README.md)
 
-[`control/servo.py → place()`](../blockblaster/control/servo.py) executes one advisor suggestion on the device: press the tray piece, drag it onto the target cells under continuous visual feedback, and release once it's locked on target. All tunables are module constants at the top of `servo.py`.
+[`control/servo/place.py → place()`](../blockblaster/control/servo/place.py) executes one advisor suggestion on the device: press the tray piece, drag it onto the target cells under continuous visual feedback, and release once it's locked on target. Tunables live in [`control/servo/config.py`](../blockblaster/control/servo/config.py).
 
 ```
 DOWN on tray piece ─▶ lift ─▶ [ track piece · PD-step finger ]loop─▶ LOCK ─▶ UP

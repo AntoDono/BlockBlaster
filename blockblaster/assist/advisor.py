@@ -1,4 +1,25 @@
-"""Greedy one-step placement suggester backed by a trained ValueNet."""
+"""3-piece feasibility-first placement suggester backed by a trained ValueNet.
+
+The advisor's job is the same as the training policy: pick the best
+*first move* across all tray pieces.  It uses the shared lookahead in
+:mod:`blockblaster.game.lookahead`, which:
+
+* Simulates each candidate placement with row/column clears, then expands
+  the remaining tray pieces.
+* Treats a *feasible* first move as one that admits a full sequence
+  placing every tray piece — these are strictly preferred.
+* Tie-breaks feasible moves by ``r_0 + γ·r_1 + γ²·r_2 + γ³·V*(s_3)``.
+* Falls back to the highest-reward terminal path when no feasible move
+  exists (best-of-a-bad-situation).
+
+On cramped boards (any tray piece has few legal positions) **every
+distinct first move is kept** at the top of the search so its feasibility
+is always evaluated — important on late-game boards where one of three
+pieces decides survival.  On sparse boards every first move is trivially
+feasible, so the same beam-bounded search the training policy uses is
+sufficient.  In both regimes deeper expansions beam-prune to keep the
+call cheap.
+"""
 
 from __future__ import annotations
 
@@ -10,37 +31,43 @@ import numpy as np
 import torch
 
 import param
-from blockblaster.game.board import Board, legal_positions_grid
+from blockblaster.game.board import legal_positions_grid
+from blockblaster.game.lookahead import PlannedStep, search_first_move
 from blockblaster.game.pieces import Piece
-from blockblaster.game.potential import board_potential
-from blockblaster.model.encoder import encode_state
 from blockblaster.model.value_net import ValueNet
+
+
+# When every tray piece has at least this many legal positions on the
+# current board, feasibility of fitting all three is overwhelmingly likely;
+# the cheap beam search is sufficient and the value-net scoring stays fast.
+# Below the threshold the board is cramped enough that the *only* feasible
+# first move may not survive a top-K cut, so we keep every first move.
+_DENSE_BOARD_POS_THRESHOLD = 10
 
 
 @dataclass(frozen=True)
 class Suggestion:
+    """A single placement plus the full lookahead plan that motivated it.
+
+    ``slot``/``row``/``col``/``piece`` describe the move the advisor wants
+    the controller to execute next.  ``plan`` is the ordered sequence of
+    placements the search expects to follow — ``plan[0]`` always matches
+    the chosen move; ``plan[1:]`` are the planned follow-ups.  The plan
+    stops at the last successfully simulated placement when ``terminal``
+    is set (the 3-piece window contains an unavoidable dead-end).
+    """
+
     slot: int
     row: int
     col: int
     piece: Piece
-
-
-def _place_and_clear(
-    grid: np.ndarray, piece: Piece, row: int, col: int
-) -> np.ndarray:
-    g = grid.copy()
-    for dr, dc in piece.cells:
-        g[row + dr, col + dc] = 1
-    full_rows = np.where(g.all(axis=1))[0]
-    full_cols = np.where(g.all(axis=0))[0]
-    if len(full_rows) or len(full_cols):
-        g[full_rows, :] = 0
-        g[:, full_cols] = 0
-    return g
+    plan: tuple[PlannedStep, ...] = ()
+    score: float = 0.0
+    terminal: bool = False
 
 
 class Advisor:
-    """Loads a ValueNet checkpoint and produces a single greedy suggestion."""
+    """Loads a ValueNet checkpoint and produces a feasibility-first suggestion."""
 
     def __init__(self, model_path: str | Path = "model.pt") -> None:
         self.model_path = Path(model_path)
@@ -83,64 +110,65 @@ class Advisor:
         board_grid: np.ndarray,
         queue: list[Optional[Piece]],
     ) -> Optional[Suggestion]:
-        """Return the best single (slot, row, col) by greedy ValueNet scoring."""
+        """Return the best first move under 3-piece feasibility-first lookahead.
+
+        ``queue`` is the assist tray with ``None`` for any slot where piece
+        detection dropped; only present slots are searched.  The returned
+        ``Suggestion.slot`` is the original tray index (0/1/2), preserved
+        even when intermediate slots are missing.
+        """
         if self.net is None or not queue:
             return None
 
-        original_slots = [i for i, p in enumerate(queue) if p is not None]
-        pieces = [queue[i] for i in original_slots]
-        if not pieces:
+        tray: list[tuple[int, Piece]] = [
+            (i, p) for i, p in enumerate(queue) if p is not None
+        ]
+        if not tray:
             return None
 
         grid = board_grid.astype(np.int8, copy=False)
         cache_key = (
             grid.tobytes(),
             grid.shape,
-            tuple((i, p.piece_id) for i, p in zip(original_slots, pieces)),
+            tuple((slot, p.piece_id) for slot, p in tray),
         )
         if cache_key == self._cache_key:
             return self._cache_value
 
-        # Build all candidate (slot_idx, row, col, next_grid) tuples.
-        candidates: list[tuple[int, int, int, np.ndarray]] = []
-        for slot_idx, piece in enumerate(pieces):
-            for r, c in legal_positions_grid(grid, piece):
-                candidates.append((slot_idx, r, c, _place_and_clear(grid, piece, r, c)))
+        # Cheap heuristic: only burn the per-first-move feasibility budget
+        # on cramped boards.  On a sparse board, every piece has many legal
+        # positions and a top-K beam never prunes the only feasible move.
+        keep_all = any(
+            len(legal_positions_grid(grid, p)) < _DENSE_BOARD_POS_THRESHOLD
+            for _, p in tray
+        )
 
-        if not candidates:
-            self._cache_key = cache_key
-            self._cache_value = None
-            return None
-
-        # Score V*(s') = V_F(s') + Phi(s') for each candidate.
-        board_obj = Board()
-        tensors = []
-        phis = []
-        for slot_idx, _, _, next_grid in candidates:
-            board_obj.grid = next_grid
-            remaining = [p for i, p in enumerate(pieces) if i != slot_idx]
-            tensors.append(encode_state(board_obj, remaining))
-            phis.append(board_potential(next_grid))
-
-        net_device = next(self.net.parameters()).device
         try:
-            batch = torch.stack(tensors, dim=0).to(net_device)
-            values = self.net.predict(batch)
-            phi_t = torch.tensor(phis, dtype=values.dtype, device=values.device)
-            scores = (values + phi_t).tolist()
+            result = search_first_move(
+                grid, tray, self.net,
+                beam_width=param.BEAM_WIDTH,
+                keep_all_first_moves=keep_all,
+                chunk_size=param.LOOKAHEAD_MAX_BATCH,
+            )
         except Exception as exc:  # noqa: BLE001
             self.last_error = f"scoring failed: {exc!r}"
             self._cache_key = cache_key
             self._cache_value = None
             return None
 
-        best = int(max(range(len(scores)), key=lambda i: scores[i]))
-        slot_idx, r, c, _ = candidates[best]
+        if result is None:
+            self._cache_key = cache_key
+            self._cache_value = None
+            return None
+
         suggestion = Suggestion(
-            slot=original_slots[slot_idx],
-            row=r,
-            col=c,
-            piece=pieces[slot_idx],
+            slot=result.slot,
+            row=result.row,
+            col=result.col,
+            piece=result.piece,
+            plan=result.plan,
+            score=result.score,
+            terminal=result.terminal,
         )
         self._cache_key = cache_key
         self._cache_value = suggestion

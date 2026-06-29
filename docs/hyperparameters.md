@@ -100,4 +100,4 @@ Every tunable lives in [`param.py`](../param.py) (the RL/sim/training side). Val
 | `CHECKPOINT_PATH` | `checkpoints/value_net.pt` | Challenger weights. |
 | `BEST_CHECKPOINT_PATH` | `checkpoints/best_value_net.pt` | Champion weights. |
 
-> The **piece classifier** and **visual servo** have their own constants (in [`blockblaster/piece_cnn/config.py`](../blockblaster/piece_cnn/config.py) and [`blockblaster/control/servo.py`](../blockblaster/control/servo.py)) — they are not part of `param.py`. See [perception.md](perception.md) and [visual-servo.md](visual-servo.md).
+> The **piece classifier** and **visual servo** have their own constants (in [`blockblaster/piece_cnn/config.py`](../blockblaster/piece_cnn/config.py) and [`blockblaster/control/servo/config.py`](../blockblaster/control/servo/config.py)) — they are not part of `param.py`. See [perception.md](perception.md) and [visual-servo.md](visual-servo.md).
