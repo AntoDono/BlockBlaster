@@ -13,16 +13,17 @@ PHONE_PANEL_W = int(PHONE_PANEL_H * PHONE_ASPECT_W / PHONE_ASPECT_H)
 
 RECON_PANEL_W      = PHONE_PANEL_W
 FRAME_DIFF_PANEL_W = PHONE_PANEL_W
-CNN_DEBUG_PANEL_W  = int(PHONE_PANEL_W * 0.62)
+SIDE_PANEL_W       = int(PHONE_PANEL_W * 0.82)  # CNN + log column (was 0.62)
 PANEL_PAD           = 20
 STATUS_BAR_H        = 36
 CONTROLS_H          = 80
+SIDE_COL_GAP        = 8
 
 WIN_W = (
     PANEL_PAD + PHONE_PANEL_W + PANEL_PAD
     + RECON_PANEL_W + PANEL_PAD
     + FRAME_DIFF_PANEL_W + PANEL_PAD
-    + CNN_DEBUG_PANEL_W + PANEL_PAD
+    + SIDE_PANEL_W + PANEL_PAD
 )
 WIN_H = PANEL_PAD + PHONE_PANEL_H + PANEL_PAD + STATUS_BAR_H + CONTROLS_H
 
@@ -39,11 +40,19 @@ FRAME_DIFF_RECT = pygame.Rect(
     FRAME_DIFF_PANEL_W,
     PHONE_PANEL_H,
 )
+_side_x = FRAME_DIFF_RECT.right + PANEL_PAD
+_side_half_h = (PHONE_PANEL_H - SIDE_COL_GAP) // 2
 CNN_DEBUG_RECT = pygame.Rect(
-    FRAME_DIFF_RECT.right + PANEL_PAD,
+    _side_x,
     PANEL_PAD,
-    CNN_DEBUG_PANEL_W,
-    PHONE_PANEL_H,
+    SIDE_PANEL_W,
+    _side_half_h,
+)
+LOG_RECT = pygame.Rect(
+    _side_x,
+    PANEL_PAD + _side_half_h + SIDE_COL_GAP,
+    SIDE_PANEL_W,
+    PHONE_PANEL_H - _side_half_h - SIDE_COL_GAP,
 )
 STATUS_RECT   = pygame.Rect(0, PANEL_PAD + PHONE_PANEL_H + PANEL_PAD, WIN_W, STATUS_BAR_H)
 CONTROLS_RECT = pygame.Rect(0, STATUS_RECT.bottom, WIN_W, CONTROLS_H)

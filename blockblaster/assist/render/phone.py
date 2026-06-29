@@ -21,6 +21,15 @@ LABEL_COL      = (160, 160, 185)
 SUGGEST_FILL   = (80, 240, 120)
 SUGGEST_BORDER = (40, 200, 80)
 SUGGEST_FILL_A = 170
+SUGGEST_GOLD   = (255, 200, 40)  # shared accent for outlines and edit overlay
+
+
+def panel_content_rect(panel_rect: pygame.Rect) -> pygame.Rect:
+    """Inner content area of a panel (under the title strip, padded)."""
+    return pygame.Rect(
+        panel_rect.x + 4, panel_rect.y + 30,
+        panel_rect.width - 8, panel_rect.height - 38,
+    )
 
 
 def bgr_to_surface(
@@ -55,7 +64,7 @@ def draw_phone_panel(
     lbl = small_font.render("PHONE SCREEN", True, LABEL_COL)
     screen.blit(lbl, (rect.x + 10, rect.y + 8))
 
-    content = pygame.Rect(rect.x + 4, rect.y + 30, rect.width - 8, rect.height - 38)
+    content = panel_content_rect(rect)
     if frame is not None:
         annotated = annotate(frame, elements) if elements else frame
         surf, _, bx, by = bgr_to_surface(annotated, content)
@@ -80,12 +89,21 @@ def draw_status_bar(
     small_font: pygame.font.Font,
     hint: str = "",
     adb_fps: float = 0.0,
+    device_detail: str = "",
 ) -> None:
     pygame.draw.rect(screen, STATUS_BG, rect)
 
     device_col = DEVICE_OK_COL if has_device else DEVICE_ERR_COL
-    device_txt = "Device: connected" if has_device else "Device: not connected"
+    if has_device:
+        extra = f" — {device_detail}" if device_detail else ""
+        device_txt = f"Device: connected{extra}"
+    else:
+        device_txt = "Device: not connected"
     d = small_font.render(device_txt, True, device_col)
+    max_w = rect.width - 280
+    if d.get_width() > max_w:
+        device_txt = _truncate(device_txt, small_font, max_w)
+        d = small_font.render(device_txt, True, device_col)
     screen.blit(d, (rect.x + 12, rect.y + (rect.height - d.get_height()) // 2))
 
     app_fps_s = small_font.render(f"App {fps:.0f} fps", True, DIM_TEXT)
@@ -102,6 +120,20 @@ def draw_status_bar(
         hint_s = small_font.render(hint, True, DIM_TEXT)
         screen.blit(hint_s, (rect.centerx - hint_s.get_width() // 2,
                              rect.y + (rect.height - hint_s.get_height()) // 2))
+
+
+def _truncate(text: str, font: pygame.font.Font, max_w: int) -> str:
+    if font.size(text)[0] <= max_w:
+        return text
+    ell = "…"
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.size(text[:mid] + ell)[0] <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ell
 
 
 def _wrap(text: str, font: pygame.font.Font, max_w: int) -> list[str]:

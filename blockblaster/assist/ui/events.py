@@ -10,11 +10,17 @@ import pygame
 
 from blockblaster.assist.ui.state import AppState
 
-_SCREENSHOTS_DIR = Path(__file__).resolve().parents[2] / "screenshots"
+_SCROLL_LINES_PER_TICK = 3
+
+_SCREENSHOTS_DIR = Path(__file__).resolve().parents[3] / "screenshots"
 
 
 def dispatch_event(event: pygame.event.Event, *, state: AppState) -> bool:
     """Route one pygame event. Returns False when the user requested quit."""
+    if event.type == pygame.MOUSEWHEEL:
+        if state.log_rect.collidepoint(pygame.mouse.get_pos()):
+            state.log_scroll = max(0, state.log_scroll + event.y * _SCROLL_LINES_PER_TICK)
+            return True
     if event.type == pygame.QUIT:
         return False
     if event.type == pygame.KEYDOWN:
@@ -32,7 +38,7 @@ def dispatch_event(event: pygame.event.Event, *, state: AppState) -> bool:
         elif action == "editboard":
             state.edit_board = not state.edit_board
         elif action == "recalibrate":
-            state.recalibrate_request = True
+            state.reset_analysis_request = True
         elif action is None and state.edit_board:
             f = _screen_to_frame(event.pos, state)
             if f is not None:
@@ -91,7 +97,7 @@ def _handle_keydown(event: pygame.event.Event, state: AppState) -> bool:
     if event.key == pygame.K_e:
         state.edit_board = not state.edit_board
     if event.key == pygame.K_r:
-        state.recalibrate_request = True
+        state.reset_analysis_request = True
     return True
 
 

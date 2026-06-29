@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import cv2
 import numpy as np
@@ -23,6 +24,9 @@ from blockblaster.assist.vision.scanner import BOARD_SIZE, scan_board
 from blockblaster.control.device import Device
 from blockblaster.game.pieces import Piece
 from blockblaster.piece_cnn.config import INPUT_SIZE
+
+if TYPE_CHECKING:
+    from blockblaster.assist.vision.frame_diff import FrameDiffTracker
 
 
 @dataclass
@@ -54,7 +58,7 @@ class AnalysisWorker:
         device: Device,
         recognizer: PieceRecognizer,
         advisor: Advisor,
-        diff_tracker: Optional[object] = None,
+        diff_tracker: Optional[FrameDiffTracker] = None,
     ) -> None:
         self._device     = device
         self._recognizer = recognizer
@@ -79,6 +83,7 @@ class AnalysisWorker:
         self._cand_count: int = 0
         self._confirmed_board: Optional[np.ndarray] = None
         self._confirmed_queue: Optional[tuple] = None
+        self._pause_until: float = 0.0
 
         # Manual board-region override (frame px (x,y,w,h)); when set, it is used
         # for board scanning/suggestion instead of the auto-detected board.
@@ -87,8 +92,46 @@ class AnalysisWorker:
     def set_board_override(
         self, bbox: Optional[tuple[int, int, int, int]]
     ) -> None:
-        """Force the board region (or pass ``None`` to resume auto-detection)."""
-        self._board_override = bbox
+        """Force the board region (or pass ``None`` to resume auto-detection).
+
+        Resets the debounce so a stale confirmed state can't linger past the
+        edit.
+        """
+        with self._lock:
+            if bbox == self._board_override:
+                return
+            self._board_override = bbox
+            self._reset_latches()
+
+    def pause_until(self, deadline: float) -> None:
+        """Extend pause to at least ``deadline`` (``time.monotonic()``)."""
+        with self._lock:
+            self._pause_until = max(self._pause_until, deadline)
+
+    def set_pause_until(self, deadline: float) -> None:
+        """Set pause deadline exactly (e.g. shorten after servo ok)."""
+        with self._lock:
+            self._pause_until = deadline
+
+    def analysis_paused(self, now: Optional[float] = None) -> bool:
+        return (now if now is not None else time.monotonic()) < self._pause_until
+
+    def discard_suggestion(self) -> None:
+        """Drop the held/snapshot suggestion without stopping analysis."""
+        with self._lock:
+            self._held_suggestion = None
+            self._held_board = None
+            self._held_queue = None
+            self._snap = dataclasses.replace(self._snap, suggestion=None)
+
+    def reset_debounce(self) -> None:
+        """Clear debounce state so the next analysis pass starts fresh."""
+        with self._lock:
+            self._cand_board = None
+            self._cand_queue = None
+            self._cand_count = 0
+            self._confirmed_board = None
+            self._confirmed_queue = None
 
     def start(self) -> None:
         if self._running:
@@ -106,16 +149,23 @@ class AnalysisWorker:
             self._thread = None
 
     def snapshot(self) -> ReconSnapshot:
+        """Return a shallow copy of the latest snapshot, safe to read from any thread."""
         with self._lock:
-            return self._snap
+            return dataclasses.replace(self._snap)
 
-    def recalibrate(self) -> None:
-        """Drop all latched state so the board + suggestion are re-derived fresh.
+    def reset_analysis(self) -> None:
+        """Drop all latched state so the next frame is analysed fresh.
 
-        Clears the held suggestion, the confirmed/candidate board, and the
-        advisor cache, so the next frame is analysed from scratch (e.g. after a
-        manual board change or a detection that drifted).
+        Clears the held suggestion, candidate/confirmed board, advisor cache,
+        and detected-board cache — invoked after a manual board change or a
+        detection that drifted.
         """
+        with self._lock:
+            self._reset_latches()
+        self._advisor.clear_cache()
+        reset_board_cache()
+
+    def _reset_latches(self) -> None:
         self._held_suggestion = None
         self._held_board = None
         self._held_queue = None
@@ -124,10 +174,7 @@ class AnalysisWorker:
         self._cand_count = 0
         self._confirmed_board = None
         self._confirmed_queue = None
-        self._advisor._cache_key = None
-        self._advisor._cache_value = None
-        reset_board_cache()  # force the board (interactables) to be re-detected
-        print("[analyzer] recalibrated — board/suggestion/board-cache cleared")
+        self._pause_until = 0.0
 
     def _loop(self) -> None:
         last_seen_id = -1
@@ -135,6 +182,10 @@ class AnalysisWorker:
         while self._running:
             frame, frame_id = self._device.get_latest_with_id()
             if frame is None:
+                time.sleep(self._IDLE_SLEEP)
+                continue
+
+            if time.monotonic() < self._pause_until:
                 time.sleep(self._IDLE_SLEEP)
                 continue
 

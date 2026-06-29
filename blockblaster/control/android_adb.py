@@ -37,10 +37,6 @@ _TARGET_FPS  = 10  # background capture rate (faster ≈ more CPU)
 _SCREENCAP_HDR = struct.Struct("<IIII")  # 16 bytes
 
 
-# Re-export ADB_BIN under the old private name for callers that still import it
-# (e.g. blockblaster.control.touch_capture).
-_ADB_BIN = ADB_BIN
-
 
 class AndroidAdbDevice(Device):
     """Compatibility Android backend using ``screencap`` (slow but portable).

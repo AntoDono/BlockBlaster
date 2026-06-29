@@ -56,9 +56,8 @@ assist/
     detection.py interactables       app.py   main loop      phone.py    mirror panel
     scanner.py   board → 8×8         events.py keys/mouse    recon.py    reconstructed scene
     piece_recognizer.py → Piece      state.py  AppState      cnn_debug.py
-    piece_mask.py geometric mask     overlay.py controls     frame_diff.py motion + servo debug
+    piece_mask.py geometric mask     controls.py chips       frame_diff.py motion + servo debug
     analyzer.py  background worker    layout.py panel rects
-    calibration.py (legacy box I/O)
   advisor.py     value net → Suggestion
   collector.py   real-crop capture tool
 
@@ -68,7 +67,6 @@ control/
   scrcpy_control.py    persistent scrcpy v1.20 touch session (servo gestures)
   ios_readonly.py      iOS mirror (read-only)
   servo.py             closed-loop PD placement
-  coords.py            piece/cell → pixel anchor helpers
 ```
 
 Flow: `play.py` → `assist/ui/app.run`. The UI loop pulls frames from a `control.Device`, a background `assist/vision/analyzer.AnalysisWorker` detects the board + tray pieces and asks `assist/advisor.Advisor` for a `Suggestion`, and the panels render it. Pressing **A** runs `control/servo.place` on a worker thread to execute the suggestion on-device. See [perception.md](perception.md), [assist-gui.md](assist-gui.md), [visual-servo.md](visual-servo.md), [control-stack.md](control-stack.md).

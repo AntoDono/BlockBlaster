@@ -168,13 +168,9 @@ def parse_wm_size(serial: str) -> tuple[int, int]:
     raise RuntimeError(f"Could not parse 'wm size' output: {raw!r}")
 
 
-# Backwards-compat alias — touch_capture and other modules import ``_ADB_BIN``.
-_ADB_BIN = ADB_BIN
-
 __all__ = [
     "ADB_BIN",
     "ADB_TIMEOUT",
-    "_ADB_BIN",
     "adb_run",
     "auto_detect_serial",
     "parse_wm_size",

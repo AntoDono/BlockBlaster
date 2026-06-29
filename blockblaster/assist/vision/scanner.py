@@ -10,7 +10,9 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-BOARD_SIZE          = 8
+from param import BOARD_SIZE  # re-exported for compat with control/servo etc.
+
+
 SAT_THRESHOLD       = 60
 VAL_THRESHOLD       = 130
 WHITE_VAL_THRESHOLD = 190
@@ -37,15 +39,10 @@ def scan_board(frame_bgr: np.ndarray, bbox: Bbox) -> np.ndarray:
     cell   = target // BOARD_SIZE
     half   = cell // 2
 
-    grid = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
-    for row in range(BOARD_SIZE):
-        for col in range(BOARD_SIZE):
-            cy = row * cell + half
-            cx = col * cell + half
-            patch = hsv[cy - 4 : cy + 5, cx - 4 : cx + 5]
-            sat = float(patch[:, :, 1].mean())
-            val = float(patch[:, :, 2].mean())
-            grid[row, col] = val > VAL_THRESHOLD and (
-                sat > SAT_THRESHOLD or val > WHITE_VAL_THRESHOLD
-            )
-    return grid
+    # Vectorised 9×9 centre-patch sample for all 64 cells: reshape the HSV crop
+    # into an (8, 8, cell, cell, 3) block grid and slice each block's centre.
+    blocks = hsv.reshape(BOARD_SIZE, cell, BOARD_SIZE, cell, 3).swapaxes(1, 2)
+    centres = blocks[:, :, half - 4:half + 5, half - 4:half + 5, :]
+    sat = centres[..., 1].mean(axis=(2, 3))
+    val = centres[..., 2].mean(axis=(2, 3))
+    return (val > VAL_THRESHOLD) & ((sat > SAT_THRESHOLD) | (val > WHITE_VAL_THRESHOLD))

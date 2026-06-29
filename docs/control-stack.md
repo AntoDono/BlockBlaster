@@ -42,10 +42,6 @@ Simple `adb input tap/swipe` can't hold a persistent gesture and react mid-drag,
 
 Mirrors a connected iPhone (via tunneld / DVT) for the read-only assist overlay. `supports_input = False` — Apple doesn't allow touch injection without a paired Mac/Xcode signature, so iOS is visualisation only.
 
-## Coordinate helpers — [`coords.py`](../blockblaster/control/coords.py)
+## Coordinates
 
-Pixel-anchor math (queue slot centres, board cell centres, piece bottom-row anchors) shared by the auto-play/servo path. The servo itself derives its grab point and target footprint from the analyzer's live detections, so these are helpers rather than a hard calibration dependency.
-
-## Other
-
-- [`touch_capture.py`](../blockblaster/control/touch_capture.py) — utility for recording real on-device touch traces (debugging / calibration reference).
+The servo derives its grab point and target footprint directly from the analyzer's live detections (`board_bbox` + tray piece bbox). No persistent pixel-anchor calibration is kept on disk.

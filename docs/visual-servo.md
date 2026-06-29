@@ -50,7 +50,7 @@ The empty-cell mask is derived adaptively (Otsu split of the baseline into dark/
 
 ## Containment
 
-If the piece's bbox **centre** drifts outside the board, the step is overridden to drive it back inward at full `MAX_STEP_PX` (status: *BOUNDARY HIT — PUSHING BACK*). Using the centre — not the edges — avoids false triggers from the drag preview rendering larger than the footprint and from legitimate edge placements.
+If any of the piece bbox's **four corners** drifts outside the board, the step is overridden to drive it back inward at full `MAX_STEP_PX` (status: *BOUNDARY HIT — PUSHING BACK*).
 
 ## Status events
 

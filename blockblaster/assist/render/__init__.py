@@ -18,4 +18,5 @@ from blockblaster.assist.render.phone import (  # noqa: F401
 )
 from blockblaster.assist.render.recon import draw_recon_panel  # noqa: F401
 from blockblaster.assist.render.cnn_debug import draw_cnn_debug_panel  # noqa: F401
+from blockblaster.assist.render.logs import draw_log_panel  # noqa: F401
 from blockblaster.assist.render.frame_diff import draw_frame_diff_panel  # noqa: F401

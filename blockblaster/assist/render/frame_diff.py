@@ -1,13 +1,13 @@
 """Frame-difference panel for the assist GUI.
 
-Draws the motion highlight produced by
-:class:`blockblaster.assist.vision.frame_diff.FrameDiffTracker`: moving pixels
-(and their recently-cached positions) glow over a darkened copy of the frame.
+Darkens the latest frame and glows the moving pixels (cached up to
+``FrameDiffTracker.ttl`` seconds). The advisor's suggested placement is
+outlined in gold on top, and the live servo state is drawn when active.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pygame
 
@@ -16,16 +16,39 @@ from blockblaster.assist.render.phone import (
     LABEL_COL,
     PANEL_BG,
     PANEL_BORDER,
+    SUGGEST_GOLD,
     bgr_to_surface,
+    panel_content_rect,
 )
 from blockblaster.assist.vision.frame_diff import (
     FrameDiffTracker,
     suggestion_cell_boxes,
 )
 
-# Suggestion outline colour — gold, kept distinct from the green recon ghost.
-SUGGEST_OUTLINE = (255, 200, 40)
+if TYPE_CHECKING:
+    from blockblaster.assist.advisor import Suggestion
+    from blockblaster.control.servo import ServoDebug
+
+Bbox = tuple[int, int, int, int]  # (x, y, w, h) in frame pixels
+
+SUGGEST_OUTLINE = SUGGEST_GOLD
 SUGGEST_OUTLINE_W = 3
+
+# Servo debug overlay colours.
+_DBG_TARGET   = SUGGEST_GOLD      # gold — target cells
+_DBG_MEASURED = (60, 220, 255)    # cyan — measured piece extent
+_DBG_FINGER   = (255, 80, 200)    # magenta — commanded finger position
+
+_EVENT_BG     = (200, 40, 40)
+_EVENT_TEXT   = (255, 240, 200)
+
+_STATUS_COLORS = {
+    "BOUNDARY HIT": ((200, 50, 50), (255, 235, 220)),
+    "FOCUSED":      ((150, 110, 20), (255, 240, 200)),
+    "LOCKED":       ((30, 130, 70), (220, 255, 230)),
+    "SEARCHING":    ((60, 60, 80), (200, 200, 220)),
+    "TRAVELING":    ((30, 70, 110), (210, 235, 255)),
+}
 
 
 def draw_frame_diff_panel(
@@ -34,14 +57,14 @@ def draw_frame_diff_panel(
     tracker: FrameDiffTracker,
     now: float,
     small_font: pygame.font.Font,
-    servo_debug: Optional[object] = None,
+    servo_debug: Optional[ServoDebug] = None,
+    servo_overlay_full: bool = False,
 ) -> None:
     """Draw the frame-difference panel.
 
-    On top of the motion composite, the advisor's suggested placement is
-    outlined directly over the phone screen (mapped from board pixels). The
-    placement is read from the tracker, which holds the last one until it
-    changes, so the outline stays put even while the analyzer briefly drops it.
+    The suggestion outline is rendered here (not baked into the composite) so
+    it stays sharp at panel scale. The placement is held by the tracker so it
+    survives brief analyzer drops.
     """
     pygame.draw.rect(screen, PANEL_BG,     rect, border_radius=10)
     pygame.draw.rect(screen, PANEL_BORDER, rect, width=2, border_radius=10)
@@ -53,7 +76,12 @@ def draw_frame_diff_panel(
     pct = small_font.render(f"{motion_pct:4.1f}%", True, DIM_TEXT)
     screen.blit(pct, (rect.right - pct.get_width() - 10, rect.y + 8))
 
-    content = pygame.Rect(rect.x + 4, rect.y + 30, rect.width - 8, rect.height - 38)
+    if servo_debug is not None:
+        sc_col = (80, 240, 120) if servo_debug.locked else _DBG_MEASURED
+        score_lbl = small_font.render(f"s={servo_debug.score:.2f}", True, sc_col)
+        screen.blit(score_lbl, (rect.x + 10 + lbl.get_width() + 10, rect.y + 8))
+
+    content = panel_content_rect(rect)
 
     composed = tracker.compose(now)
     if composed is None:
@@ -69,126 +97,100 @@ def draw_frame_diff_panel(
         screen, tracker.suggestion, tracker.board_bbox, scale, bx, by,
     )
 
-    if servo_debug is not None:
-        _draw_servo_debug(screen, servo_debug, scale, bx, by, small_font)
+    if servo_debug is not None and servo_overlay_full:
+        _draw_servo_debug(screen, servo_debug, content, scale, bx, by, small_font)
+    elif servo_debug is not None and servo_debug.status:
+        _draw_status_banner(
+            screen, servo_debug.status,
+            content.x + 6, content.bottom - small_font.get_height() - 14,
+            small_font,
+        )
 
     if tracker.event_active(now):
         _draw_event_banner(screen, content, small_font)
 
 
-# Servo debug overlay colours.
-_DBG_TARGET   = (255, 200, 40)    # gold — where each cell should land
-_DBG_MEASURED = (60, 220, 255)    # cyan — measured motion centroid per cell
-_DBG_FINGER   = (255, 80, 200)    # magenta — commanded finger position
-
-
 def _draw_servo_debug(
     screen: pygame.Surface,
-    dbg: object,
+    dbg: ServoDebug,
+    content: pygame.Rect,
     scale: float,
     blit_x: int,
     blit_y: int,
     font: pygame.font.Font,
 ) -> None:
-    """Visualize what the servo tracks: target cells, motion centroids, finger.
+    """Visualize what the servo tracks: target cells, motion blob, finger."""
 
-    ``dbg`` is a ``control.servo.ServoDebug`` (typed as object to avoid a
-    control-layer import in the render module).
-    """
-    def to_screen(p) -> tuple[int, int]:
+    def to_screen(p: tuple[int, int]) -> tuple[int, int]:
         return (blit_x + int(p[0] * scale), blit_y + int(p[1] * scale))
 
-    def bbox_rect(b) -> pygame.Rect:
-        x0, y0, x1, y1 = b
-        sx0, sy0 = to_screen((x0, y0))
-        sx1, sy1 = to_screen((x1, y1))
-        return pygame.Rect(sx0, sy0, max(1, sx1 - sx0), max(1, sy1 - sy0))
+    def bbox_rect(b: Bbox) -> pygame.Rect:
+        x, y, w, h = b
+        sx, sy = to_screen((x, y))
+        sx1, sy1 = to_screen((x + w, y + h))
+        return pygame.Rect(sx, sy, max(1, sx1 - sx), max(1, sy1 - sy))
 
-    observe_bbox = getattr(dbg, "observe_bbox", None)
-    board_aware = getattr(dbg, "board_aware", False)
-    unobserved = getattr(dbg, "unobserved_cells", None) or []
-    target_bbox = getattr(dbg, "target_bbox", None)
-    measured_bbox = getattr(dbg, "measured_bbox", None)
-    finger = getattr(dbg, "finger_px", None)
-
-    # Observed region: only visualize the focused local window in board-aware
-    # mode — dim everything outside it plus the unobserved (filled) cells, so
-    # only the searched area stays bright. No overlay during full-board scan.
-    if observe_bbox is not None and board_aware:
-        shade = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
-        full = screen.get_rect()
-        obs = bbox_rect(observe_bbox)
+    # In board-aware mode, dim everything outside the focus window and the
+    # filled (unobserved) cells so only the searched area stays bright.
+    if dbg.observe_bbox is not None and dbg.board_aware:
+        shade = pygame.Surface((content.width, content.height), pygame.SRCALPHA)
+        obs = bbox_rect(dbg.observe_bbox).clip(content)
+        obs_local = obs.move(-content.x, -content.y)
         for r in (
-            pygame.Rect(full.left, full.top, full.width, obs.top - full.top),
-            pygame.Rect(full.left, obs.bottom, full.width, full.bottom - obs.bottom),
-            pygame.Rect(full.left, obs.top, obs.left - full.left, obs.height),
-            pygame.Rect(obs.right, obs.top, full.right - obs.right, obs.height),
+            pygame.Rect(0, 0, content.width, obs_local.top),
+            pygame.Rect(0, obs_local.bottom, content.width, content.height - obs_local.bottom),
+            pygame.Rect(0, obs_local.top, obs_local.left, obs_local.height),
+            pygame.Rect(obs_local.right, obs_local.top,
+                        content.width - obs_local.right, obs_local.height),
         ):
             if r.width > 0 and r.height > 0:
                 shade.fill((0, 0, 0, 110), r)
-        for cell in unobserved:
-            shade.fill((0, 0, 0, 150), bbox_rect(cell))
-        screen.blit(shade, (0, 0))
+        for cell in dbg.unobserved_cells:
+            cell_local = bbox_rect(cell).clip(content).move(-content.x, -content.y)
+            shade.fill((0, 0, 0, 150), cell_local)
+        screen.blit(shade, content.topleft)
         pygame.draw.rect(screen, (80, 240, 120), obs, width=2)
-    score = getattr(dbg, "score", 0.0)
-    locked = getattr(dbg, "locked", False)
-    err = getattr(dbg, "err_px", (0, 0))
-    step = getattr(dbg, "step_px", (0, 0))
 
-    target_pts = getattr(dbg, "target_pts", None) or []
-    measured_pts = getattr(dbg, "measured_pts", None) or []
-
-    # Target footprint: hollow gold rectangle + its 5 reference points.
-    if target_bbox is not None:
-        pygame.draw.rect(screen, _DBG_TARGET, bbox_rect(target_bbox), width=2)
-    for p in target_pts:
+    if dbg.target_bbox is not None:
+        pygame.draw.rect(screen, _DBG_TARGET, bbox_rect(dbg.target_bbox), width=2)
+    for p in dbg.target_pts:
         pygame.draw.circle(screen, _DBG_TARGET, to_screen(p), 4, width=1)
 
-    # Measured piece extent: cyan rectangle + its 5 reference points, each tied
-    # to the corresponding target point by a line (the 5-point error mapping).
-    if measured_bbox is not None:
-        pygame.draw.rect(screen, _DBG_MEASURED, bbox_rect(measured_bbox), width=2)
-    for i, p in enumerate(measured_pts):
+    if dbg.measured_bbox is not None:
+        pygame.draw.rect(screen, _DBG_MEASURED, bbox_rect(dbg.measured_bbox), width=2)
+    for i, p in enumerate(dbg.measured_pts):
         sp = to_screen(p)
         pygame.draw.circle(screen, _DBG_MEASURED, sp, 3)
-        if i < len(target_pts):
-            pygame.draw.line(screen, _DBG_MEASURED, sp, to_screen(target_pts[i]), 1)
+        if i < len(dbg.target_pts):
+            pygame.draw.line(screen, _DBG_MEASURED, sp, to_screen(dbg.target_pts[i]), 1)
 
-    if finger is not None:
-        fp = to_screen(finger)
+    if dbg.finger_px is not None:
+        fp = to_screen(dbg.finger_px)
         pygame.draw.line(screen, _DBG_FINGER, (fp[0] - 8, fp[1]), (fp[0] + 8, fp[1]), 2)
         pygame.draw.line(screen, _DBG_FINGER, (fp[0], fp[1] - 8), (fp[0], fp[1] + 8), 2)
 
-    col = (80, 240, 120) if locked else _DBG_MEASURED
-    mode = "BOARD-AWARE" if board_aware else "FULL SCAN"
-    state = "LOCK" if locked else "track"
-    dist = int(round((err[0] ** 2 + err[1] ** 2) ** 0.5))
-    line1 = f"servo {state}  [{mode}]  s={score:.2f}"
-    line2 = f"err=({err[0]:+d},{err[1]:+d})  corr=({step[0]:+d},{step[1]:+d})"
-    line3 = f"dist to target: {dist}px"
+    col = (80, 240, 120) if dbg.locked else _DBG_MEASURED
+    mode = "BOARD-AWARE" if dbg.board_aware else "FULL SCAN"
+    state = "LOCK" if dbg.locked else "track"
+    dist = int(round((dbg.err_px[0] ** 2 + dbg.err_px[1] ** 2) ** 0.5))
+    lines = [
+        f"servo {state}  [{mode}]  s={dbg.score:.2f}",
+        f"err=({dbg.err_px[0]:+d},{dbg.err_px[1]:+d})  "
+        f"corr=({dbg.step_px[0]:+d},{dbg.step_px[1]:+d})",
+        f"dist to target: {dist}px",
+    ]
     lh = font.get_height() + 2
-    screen.blit(font.render(line1, True, col), (blit_x + 6, blit_y + 6))
-    screen.blit(font.render(line2, True, col), (blit_x + 6, blit_y + 6 + lh))
-    screen.blit(font.render(line3, True, col), (blit_x + 6, blit_y + 6 + 2 * lh))
+    for i, line in enumerate(lines):
+        screen.blit(font.render(line, True, col), (blit_x + 6, blit_y + 6 + i * lh))
 
-    # Prominent status banner for the current servo phase / event.
-    status = getattr(dbg, "status", "") or ""
-    if status:
-        _draw_status_banner(screen, status, locked, blit_x, blit_y + 6 + 3 * lh + 4, font)
-
-
-# Status → banner colour (bg, fg).
-_STATUS_COLORS = {
-    "BOUNDARY HIT": ((200, 50, 50), (255, 235, 220)),
-    "FOCUSED": ((150, 110, 20), (255, 240, 200)),
-    "LOCKED": ((30, 130, 70), (220, 255, 230)),
-    "SEARCHING": ((60, 60, 80), (200, 200, 220)),
-    "TRAVELING": ((30, 70, 110), (210, 235, 255)),
-}
+    if dbg.status:
+        _draw_status_banner(
+            screen, dbg.status, blit_x, blit_y + 6 + len(lines) * lh + 4, font,
+        )
 
 
 def _draw_status_banner(
-    screen: pygame.Surface, status: str, locked: bool, x: int, y: int,
+    screen: pygame.Surface, status: str, x: int, y: int,
     font: pygame.font.Font,
 ) -> None:
     bg, fg = (30, 70, 110), (210, 235, 255)
@@ -205,18 +207,17 @@ def _draw_status_banner(
 
 def _draw_suggestion_outline(
     screen: pygame.Surface,
-    suggestion: Optional[object],
-    board_bbox: Optional[tuple[int, int, int, int]],
+    suggestion: Optional[Suggestion],
+    board_bbox: Optional[Bbox],
     scale: float,
     blit_x: int,
     blit_y: int,
 ) -> None:
     """Trace a gold outline around the suggested placement footprint."""
     boxes = suggestion_cell_boxes(suggestion, board_bbox)
-    if not boxes:
+    if not boxes or suggestion is None:
         return
 
-    # Map each in-bounds piece cell (by board grid coords) to its screen rect.
     occupied: dict[tuple[int, int], pygame.Rect] = {}
     for (dr, dc), (x, y, w, h) in zip(suggestion.piece.cells, boxes):
         rect = pygame.Rect(
@@ -227,8 +228,8 @@ def _draw_suggestion_outline(
         )
         occupied[(suggestion.row + dr, suggestion.col + dc)] = rect
 
-    # Draw only the perimeter: skip an edge when the adjacent grid cell is also
-    # part of the footprint, so internal grid lines stay hidden.
+    # Draw an edge only when the adjacent cell is outside the footprint, so
+    # internal seams stay hidden.
     for (r, c), cell in occupied.items():
         if (r, c - 1) not in occupied:
             pygame.draw.line(screen, SUGGEST_OUTLINE, cell.topleft, cell.bottomleft, SUGGEST_OUTLINE_W)
@@ -240,18 +241,14 @@ def _draw_suggestion_outline(
             pygame.draw.line(screen, SUGGEST_OUTLINE, cell.bottomleft, cell.bottomright, SUGGEST_OUTLINE_W)
 
 
-_EVENT_BG     = (200, 40, 40)
-_EVENT_TEXT   = (255, 240, 200)
-
-
 def _draw_event_banner(
     screen: pygame.Surface,
     content: pygame.Rect,
     small_font: pygame.font.Font,
 ) -> None:
     label = small_font.render("EVENT DETECTED", True, _EVENT_TEXT)
-    pad   = 8
-    box   = pygame.Rect(0, 0, label.get_width() + pad * 2, label.get_height() + pad)
+    pad = 8
+    box = pygame.Rect(0, 0, label.get_width() + pad * 2, label.get_height() + pad)
     box.centerx = content.centerx
     box.y = content.y + 12
     pygame.draw.rect(screen, _EVENT_BG, box, border_radius=6)

@@ -77,6 +77,20 @@ class Device:
             )
 
 
+def device_status_detail(
+    device: Device, frame_w: int = 0, frame_h: int = 0,
+) -> str:
+    """Short summary for the status bar / connect log (backend, serial, size)."""
+    parts = [device.name]
+    serial = getattr(device, "_serial", None)
+    if serial:
+        parts.append(str(serial))
+    if frame_w > 0 and frame_h > 0:
+        parts.append(f"{frame_w}×{frame_h}")
+    parts.append("input" if device.supports_input else "read-only")
+    return " · ".join(parts)
+
+
 def make_device(
     platform: Literal["ios", "android"],
     serial: Optional[str] = None,

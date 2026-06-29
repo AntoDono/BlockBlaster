@@ -11,12 +11,13 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from blockblaster.assist.vision.detection import BG_DIFF_THRESHOLD
+
 # ── Thresholds ───────────────────────────────────────────────────────────────
 # We separate the piece from the background by sampling a border ring of the
 # slot (always background) and masking pixels that differ from that colour.
 # This adapts to any game background without hand-tuning HSV ranges.
 BG_BORDER_PX        = 6      # width of border ring used to sample background colour
-BG_DIFF_THRESHOLD   = 60     # min sum-of-channel-abs-diff to count as foreground
 MIN_FILL_PIXELS     = 200    # min mask pixels before considering slot occupied
 MIN_FILL_FRACTION   = 0.005  # also require at least 0.5% of slot area
 MIN_BBOX_DIM        = 8      # min height/width of tight bbox
@@ -25,6 +26,10 @@ CELL_FILL_THRESHOLD = 0.45   # mean mask value (0-1) above which a sub-cell is "
 MIN_MATCH_SCORE     = 0.60   # min final score for a result to be returned
 
 MORPH_KERNEL        = 3      # opening kernel size (removes salt noise)
+
+_OPEN_KERNEL_MAT = cv2.getStructuringElement(
+    cv2.MORPH_RECT, (MORPH_KERNEL, MORPH_KERNEL),
+)
 
 
 def get_binary_mask(crop_bgr: np.ndarray) -> np.ndarray:
@@ -50,10 +55,7 @@ def get_binary_mask(crop_bgr: np.ndarray) -> np.ndarray:
     diff = np.abs(crop_bgr.astype(np.int16) - bg_color).sum(axis=2)
     mask = (diff > BG_DIFF_THRESHOLD).astype(np.uint8) * 255
 
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT, (MORPH_KERNEL, MORPH_KERNEL)
-    )
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _OPEN_KERNEL_MAT)
     return mask
 
 

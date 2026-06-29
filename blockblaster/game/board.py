@@ -10,6 +10,24 @@ import param
 from blockblaster.game.pieces import Piece
 
 
+def legal_positions_grid(grid: np.ndarray, piece: Piece) -> list[tuple[int, int]]:
+    """All ``(row, col)`` top-left positions where ``piece`` fits on ``grid``.
+
+    Operates on a raw int/bool array (no :class:`Board` allocation) and uses a
+    vectorised conjunction of shifted occupancy masks, which is the hot path
+    for the beam-search policy and the live advisor.
+    """
+    n = grid.shape[0]
+    pr, pc = piece.rows, piece.cols
+    if pr > n or pc > n:
+        return []
+    valid = np.ones((n - pr + 1, n - pc + 1), dtype=bool)
+    for dr, dc in piece.cells:
+        valid &= grid[dr : n - pr + 1 + dr, dc : n - pc + 1 + dc] == 0
+    rs, cs = np.where(valid)
+    return list(zip(rs.tolist(), cs.tolist()))
+
+
 class Board:
     """Mutable 8x8 grid.  Cells are 1 (occupied) or 0 (empty)."""
 
@@ -36,12 +54,7 @@ class Board:
 
     def legal_placements(self, piece: Piece) -> list[tuple[int, int]]:
         """Return all (row, col) positions where `piece` can be placed."""
-        positions: list[tuple[int, int]] = []
-        for r in range(param.BOARD_SIZE):
-            for c in range(param.BOARD_SIZE):
-                if self.can_place(piece, r, c):
-                    positions.append((r, c))
-        return positions
+        return legal_positions_grid(self.grid, piece)
 
     def is_game_over(self, queue: list[Piece]) -> bool:
         """True when no piece in `queue` has any legal placement."""

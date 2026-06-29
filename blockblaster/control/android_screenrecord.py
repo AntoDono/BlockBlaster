@@ -36,7 +36,6 @@ from blockblaster.control.device import Device
 
 _SEGMENT_SECONDS = 170          # under the 180-second screenrecord hard cap
 _BIT_RATE        = 8_000_000    # 8 Mbps — plenty for an 8x8 grid game
-_DIAG_INTERVAL_S = 2.0          # how often to log capture FPS
 
 
 class AndroidScreenrecordDevice(Device):
@@ -209,9 +208,6 @@ class AndroidScreenrecordDevice(Device):
         self._proc = self._spawn_screenrecord()
         assert self._proc.stdout is not None
 
-        diag_n      = 0
-        diag_window = time.monotonic()
-
         # PyAV reads raw H.264 NAL units directly from the pipe.
         try:
             container = av.open(self._proc.stdout, format="h264", mode="r")
@@ -230,15 +226,6 @@ class AndroidScreenrecordDevice(Device):
                     self._frame    = arr
                     self._frame_id += 1
                     self._last_error = None
-                diag_n += 1
-
-                now = time.monotonic()
-                if now - diag_window >= _DIAG_INTERVAL_S:
-                    fps = diag_n / (now - diag_window)
-                    print(f"[screenrecord] {diag_n} frames in "
-                          f"{now - diag_window:.2f}s → {fps:.1f} fps")
-                    diag_n      = 0
-                    diag_window = now
         finally:
             try:
                 container.close()

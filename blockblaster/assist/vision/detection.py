@@ -88,18 +88,26 @@ def estimate_background_bgr(frame_bgr: np.ndarray) -> np.ndarray:
     return strip.reshape(-1, 3).mean(axis=0).astype(np.int16)
 
 
+_OPEN_KERNEL_MAT = (
+    cv2.getStructuringElement(cv2.MORPH_RECT, (OPEN_KERNEL, OPEN_KERNEL))
+    if OPEN_KERNEL > 0 else None
+)
+_CLOSE_KERNEL_MAT = (
+    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CLOSE_KERNEL, CLOSE_KERNEL))
+    if CLOSE_KERNEL > 0 else None
+)
+
+
 def foreground_mask(frame_bgr: np.ndarray) -> np.ndarray:
     """Return a uint8 {0,255} mask of pixels that differ from the background."""
     bg   = estimate_background_bgr(frame_bgr)
     diff = np.abs(frame_bgr.astype(np.int16) - bg).sum(axis=2)
     mask = (diff > BG_DIFF_THRESHOLD).astype(np.uint8) * 255
 
-    if OPEN_KERNEL > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (OPEN_KERNEL, OPEN_KERNEL))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
-    if CLOSE_KERNEL > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (CLOSE_KERNEL, CLOSE_KERNEL))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    if _OPEN_KERNEL_MAT is not None:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _OPEN_KERNEL_MAT)
+    if _CLOSE_KERNEL_MAT is not None:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _CLOSE_KERNEL_MAT)
     return mask
 
 

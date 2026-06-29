@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 import param
-from blockblaster.game.board import Board
+from blockblaster.game.board import Board, legal_positions_grid
 from blockblaster.game.pieces import Piece
 from blockblaster.game.potential import board_potential
 from blockblaster.model.encoder import encode_state
@@ -23,18 +23,6 @@ class Suggestion:
     row: int
     col: int
     piece: Piece
-
-
-def _legal_positions(grid: np.ndarray, piece: Piece) -> list[tuple[int, int]]:
-    n = grid.shape[0]
-    pr, pc = piece.rows, piece.cols
-    if pr > n or pc > n:
-        return []
-    valid = np.ones((n - pr + 1, n - pc + 1), dtype=bool)
-    for dr, dc in piece.cells:
-        valid &= grid[dr : n - pr + 1 + dr, dc : n - pc + 1 + dc] == 0
-    rs, cs = np.where(valid)
-    return list(zip(rs.tolist(), cs.tolist()))
 
 
 def _place_and_clear(
@@ -61,6 +49,11 @@ class Advisor:
         self._cache_key: Optional[tuple] = None
         self._cache_value: Optional[Suggestion] = None
         self._load()
+
+    def clear_cache(self) -> None:
+        """Forget the last (board, queue) → suggestion result."""
+        self._cache_key = None
+        self._cache_value = None
 
     def _load(self) -> None:
         if not self.model_path.exists():
@@ -111,7 +104,7 @@ class Advisor:
         # Build all candidate (slot_idx, row, col, next_grid) tuples.
         candidates: list[tuple[int, int, int, np.ndarray]] = []
         for slot_idx, piece in enumerate(pieces):
-            for r, c in _legal_positions(grid, piece):
+            for r, c in legal_positions_grid(grid, piece):
                 candidates.append((slot_idx, r, c, _place_and_clear(grid, piece, r, c)))
 
         if not candidates:

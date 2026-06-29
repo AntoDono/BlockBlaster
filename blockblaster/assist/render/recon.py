@@ -30,7 +30,8 @@ from blockblaster.gui.render import (
     PIECE_COLORS,
 )
 
-BOARD_SIZE     = 8
+from param import BOARD_SIZE
+
 CANVAS_BG      = (12, 12, 22)
 CANVAS_BORDER  = (40, 40, 60)
 

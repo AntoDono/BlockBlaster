@@ -61,7 +61,7 @@ import numpy as np
 import torch
 
 import param
-from blockblaster.game.board import Board
+from blockblaster.game.board import Board, legal_positions_grid
 from blockblaster.game.env import BlockBlastEnv
 from blockblaster.game.pieces import Piece
 from blockblaster.game.potential import board_potential
@@ -73,19 +73,6 @@ from blockblaster.model.value_net import ValueNet
 # ---------------------------------------------------------------------------
 # Grid helpers (operate on raw np.ndarray to avoid env-clone overhead)
 # ---------------------------------------------------------------------------
-
-def _legal_positions(grid: np.ndarray, piece: Piece) -> list[tuple[int, int]]:
-    """Return all (row, col) top-left positions where `piece` fits on `grid`."""
-    n = grid.shape[0]
-    pr, pc = piece.rows, piece.cols
-    if pr > n or pc > n:
-        return []
-    valid = np.ones((n - pr + 1, n - pc + 1), dtype=bool)
-    for dr, dc in piece.cells:
-        valid &= grid[dr : n - pr + 1 + dr, dc : n - pc + 1 + dc] == 0
-    rs, cs = np.where(valid)
-    return list(zip(rs.tolist(), cs.tolist()))
-
 
 def _place_and_clear(
     grid: np.ndarray, piece: Piece, row: int, col: int
@@ -311,7 +298,7 @@ def select_action(
     for ordering in distinct_orderings:
         p0 = queue[ordering[0]]
         remaining = [queue[ordering[i]] for i in range(1, n_pieces)]
-        for r, c in _legal_positions(grid, p0):
+        for r, c in legal_positions_grid(grid, p0):
             new_grid, lines = _place_and_clear(grid, p0, r, c)
             r0 = step_reward(len(p0.cells), lines)
             d1_cands.append(
@@ -358,7 +345,7 @@ def select_action(
             )
             continue
         p1 = remaining[0]
-        positions = _legal_positions(g1, p1)
+        positions = legal_positions_grid(g1, p1)
         if not positions:
             # Dead-end: next planned piece has nowhere to land → game
             # over.  V*=0, flag terminal.  Filtered at selection unless
@@ -400,7 +387,7 @@ def select_action(
             )
             continue
         p2 = remaining[0]
-        positions = _legal_positions(g2, p2)
+        positions = legal_positions_grid(g2, p2)
         if not positions:
             # Dead-end at depth 3: game over.
             leaf_candidates.append((first_action, accum2, True))

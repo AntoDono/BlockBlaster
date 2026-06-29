@@ -1,21 +1,18 @@
-"""Closed-loop visual-servo placement for auto-play.
+"""Closed-loop visual servo for auto-play.
 
-Drives a single piece from the tray onto the advisor's target cells using a
-persistent touch gesture (scrcpy DOWN → MOVE… → UP) under continuous visual
-feedback — a PD controller closes the loop so the piece *lands* on target
-regardless of grab error, render lift, or device-space scaling.
+Drags one tray piece onto the advisor's target cells with scrcpy
+(DOWN → MOVE… → UP) under continuous visual feedback. A PD controller closes
+the loop on a 5-point error so the piece lands on target regardless of grab
+offset, render lift, or device scaling.
 
-Detection is colour/palette-invariant: cache the grayscale board crop just
-before DOWN as a baseline, then per frame ``cv2.absdiff`` against it, threshold
-to a binary "moved" mask, and localise with ``cv2.matchTemplate`` of the known
-piece silhouette. The held piece is the only thing moving on the board, so the
-diff lights up exactly its footprint regardless of colour or ghost-preview
-noise. The controller releases (UP) only once every visible cell sits within
-``LOCK_TOL_PX`` of its target — i.e. the piece is confirmed in the right place.
+Detection is palette-invariant: cache the grayscale board just before DOWN as
+a baseline, then per frame ``cv2.absdiff`` against it and localise the moving
+blob with ``cv2.matchTemplate`` of the piece silhouette. Release fires when
+``scan_board`` sees every footprint cell filled (the game's drag preview) for
+``RECON_LOCK_FRAMES`` consecutive frames — same HSV occupancy logic as the
+reconstruction panel.
 
-Unlike the old version this takes the board region and grab point directly from
-the live detector (analyzer ``board_bbox`` + tray piece bbox) — no manual
-calibration step.
+Tuning details live in ``docs/visual-servo.md``.
 """
 
 from __future__ import annotations
@@ -29,101 +26,105 @@ import cv2
 import numpy as np
 
 from blockblaster.assist.advisor import Suggestion
-from blockblaster.assist.vision.scanner import BOARD_SIZE
+from blockblaster.assist.vision.scanner import BOARD_SIZE, scan_board
 from blockblaster.control.device import Device
 from blockblaster.control.scrcpy_control import get_scrcpy
 from blockblaster.game.pieces import Piece
 
-# ── Grab / gesture timing ─────────────────────────────────────────────────
-HOLD_MS              = 240   # dwell after DOWN before any MOVE (long-press grab)
-PRE_LIFT_MS          = 260   # settle before UP so the game commits the place
-INITIAL_LIFT_PX      = 150    # initial upward nudge so the piece pops above finger
-START_NOISE_X_PX     = 30    # random ± x jitter on the initial lift, so a retry
-                             # doesn't deterministically repeat the same bad path
-# ── Loop pacing ───────────────────────────────────────────────────────────
-MAX_LOOP_S           = 7.0   # total servo budget per placement
-SETTLE_MS            = 50    # sleep after each move() so the next frame settles
-FRAME_TIMEOUT_S      = 0.03  # how long to wait for a fresh frame per iter
-MAX_NO_PIECE_FRAMES  = 12    # consecutive no-detect frames before aborting
-# ── PD controller ─────────────────────────────────────────────────────────
-GAIN                 = 0.7   # P term: piece-px per finger-px (smaller = bigger steps)
-DERIV_GAIN           = 1.8   # D term: damps overshoot
-MAX_STEP_PX          = 50    # per-iter step clamp while travelling (coarse)
-FINE_STEP_PX         = 10     # tighter per-iter clamp once within APPROACH_RADIUS
-                             # — small careful nudges near the target, no overshoot
-MOVE_SUBSTEPS        = 4     # interpolate each step into N touch-MOVEs
-MOVE_SUBSTEP_MS      = 8     # spacing between sub-steps
-# ── Approach / lock ───────────────────────────────────────────────────────
-APPROACH_RADIUS_PX   = 300    # once the *piece* is within this of the target, focus
-                             # on a local window around the target (empty cells
-                             # only) for a precise lock; until then track with the
-                             # full board mask so the travelling piece isn't lost
-ROI_MARGIN_PX        = APPROACH_RADIUS_PX // 2    # half-padding of the local focus window around the
-                             # target footprint, in frame pixels
-OBSERVE_MARGIN_PX    = 10000 # how far past the board (toward the screen edges) the
-                             # observed region extends, so an edge target / piece
-                             # isn't clipped to the board (clamped to the frame)
-LOCK_TOL_PX          = 30    # |err| px tolerance on both axes to release
-LOCK_SCORE_MIN       = 0.70  # required template-match score to release
-MATCH_SCORE_MIN      = 0.20  # below this, treat frame as "no piece"
-# ── Detection ─────────────────────────────────────────────────────────────
-DIFF_THRESHOLD       = 25    # per-pixel grayscale abs-diff threshold
-MORPH_KERNEL_PX      = 7     # closing kernel: fills holes for a solid blob
-MIN_MOVED_PX         = 60    # absolute floor on the largest blob's area
-PIECE_AREA_FRAC      = 0.22  # largest blob must cover at least this fraction of
-                             # the piece's expected footprint area — scales the
-                             # noise floor to the piece so small speckle (well
-                             # below a real piece) is never mistaken for it
-EDGE_TRIM_PCT        = 3     # percentile trim on the blob extent (robust to the
-                             # blob's own ragged anti-aliased edge)
+# Grab / gesture timing
+HOLD_MS              = 240
+PRE_LIFT_MS          = 260
+INITIAL_LIFT_PX      = 150
+START_NOISE_X_PX     = 30
+
+# Loop pacing
+MAX_LOOP_S           = 5.0
+SETTLE_MS            = 50
+FRAME_TIMEOUT_S      = 0.03
+MAX_NO_PIECE_FRAMES  = 12
+
+# PD controller
+GAIN                 = 0.7
+DERIV_GAIN           = 1.8
+MAX_STEP_PX          = 50
+FINE_STEP_PX         = 10
+MOVE_SUBSTEPS        = 4
+MOVE_SUBSTEP_MS      = 8
+
+# Approach / lock
+APPROACH_RADIUS_PX   = 300
+ROI_MARGIN_PX        = APPROACH_RADIUS_PX // 2
+RECON_LOCK_FRAMES    = 4
+BOUNDARY_TOL_PX      = 30
+MATCH_SCORE_MIN      = 0.20
+
+# Detection
+DIFF_THRESHOLD       = 25
+MORPH_KERNEL_PX      = 7
+MIN_MOVED_PX         = 60
+PIECE_AREA_FRAC      = 0.22
 
 Bbox = tuple[int, int, int, int]  # (x, y, w, h) in frame pixels
 
 
-def _five_points(
-    x0: float, y0: float, x1: float, y1: float
-) -> list[tuple[int, int]]:
+def _five_points(bbox: Bbox) -> list[tuple[int, int]]:
     """Centre + 4 bbox corners — the reference points aligned by the servo."""
-    cx = int((x0 + x1) / 2)
-    cy = int((y0 + y1) / 2)
-    return [
-        (cx, cy),
-        (int(x0), int(y0)), (int(x1), int(y0)),
-        (int(x0), int(y1)), (int(x1), int(y1)),
-    ]
+    x, y, w, h = bbox
+    x1, y1 = x + w, y + h
+    cx, cy = (x + x1) // 2, (y + y1) // 2
+    return [(cx, cy), (x, y), (x1, y), (x, y1), (x1, y1)]
+
+
+def _footprint_filled(
+    baseline: np.ndarray,
+    current: np.ndarray,
+    piece: Piece,
+    row: int,
+    col: int,
+) -> bool:
+    """True when every target cell reads filled now but was empty pre-grab."""
+    for dr, dc in piece.cells:
+        r, c = row + dr, col + dc
+        if not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE):
+            return False
+        if baseline[r, c] or not current[r, c]:
+            return False
+    return True
 
 
 @dataclass
 class ServoDebug:
-    """Live snapshot of what the servo is tracking, for GUI visualization.
+    """Live snapshot of the servo state for the GUI overlay.
 
-    All points are in *frame pixels*. ``measured_px`` are the per-cell motion
-    centroids the controller actually averages; ``target_px`` are the cell
-    centres it's driving them toward; ``finger_px`` is the current commanded
-    finger position.
+    All bboxes are ``(x, y, w, h)`` in frame pixels.
     """
-    target_bbox: Optional[tuple[int, int, int, int]] = None   # (x0,y0,x1,y1) frame px
-    measured_bbox: Optional[tuple[int, int, int, int]] = None  # (x0,y0,x1,y1) frame px
-    target_pts: list[tuple[int, int]] = field(default_factory=list)    # 5 pts
-    measured_pts: list[tuple[int, int]] = field(default_factory=list)  # 5 pts
-    observe_bbox: Optional[tuple[int, int, int, int]] = None    # board region read
-    board_aware: bool = False   # True once near target: only empty cells observed
-    unobserved_cells: list[tuple[int, int, int, int]] = field(default_factory=list)
+    target_bbox: Optional[Bbox] = None
+    measured_bbox: Optional[Bbox] = None
+    target_pts: list[tuple[int, int]] = field(default_factory=list)
+    measured_pts: list[tuple[int, int]] = field(default_factory=list)
+    observe_bbox: Optional[Bbox] = None
+    board_aware: bool = False
+    unobserved_cells: list[Bbox] = field(default_factory=list)
     finger_px: Optional[tuple[int, int]] = None
     err_px: tuple[int, int] = (0, 0)
-    step_px: tuple[int, int] = (0, 0)   # correction applied to the finger this iter
+    step_px: tuple[int, int] = (0, 0)
     score: float = 0.0
     locked: bool = False
-    status: str = ""   # human-readable phase/event for the GUI banner
+    status: str = ""
 
 
 DebugSink = Callable[[Optional[ServoDebug]], None]
+LogSink = Callable[[str], None]
 
 
-# ── Detection helpers ──────────────────────────────────────────────────────
+_MORPH_KERNEL = cv2.getStructuringElement(
+    cv2.MORPH_ELLIPSE, (MORPH_KERNEL_PX, MORPH_KERNEL_PX),
+)
+_TEMPLATE_CACHE: dict[tuple[int, int, int], np.ndarray] = {}
 
-def _board_gray(frame_bgr: np.ndarray, grid: Bbox) -> np.ndarray:
-    x, y, w, h = grid
+
+def _board_gray(frame_bgr: np.ndarray, region: Bbox) -> np.ndarray:
+    x, y, w, h = region
     crop = frame_bgr[y:y + h, x:x + w]
     if crop.size == 0:
         return np.zeros((max(1, h), max(1, w)), np.uint8)
@@ -136,37 +137,38 @@ def _motion_mask(current_gray: np.ndarray, baseline_gray: np.ndarray) -> np.ndar
     diff = cv2.absdiff(current_gray, baseline_gray)
     _, mask = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
     if MORPH_KERNEL_PX > 1:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (MORPH_KERNEL_PX, MORPH_KERNEL_PX),
-        )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_KERNEL)
     return mask
 
 
 def _make_template(piece: Piece, cell_h: int, cell_w: int) -> np.ndarray:
+    key = (piece.piece_id, cell_h, cell_w)
+    cached = _TEMPLATE_CACHE.get(key)
+    if cached is not None:
+        return cached
     tpl = np.zeros((piece.rows * cell_h, piece.cols * cell_w), np.uint8)
     for dr, dc in piece.cells:
         tpl[dr * cell_h:(dr + 1) * cell_h, dc * cell_w:(dc + 1) * cell_w] = 255
+    _TEMPLATE_CACHE[key] = tpl
     return tpl
 
 
 def _largest_blob_bbox(
-    search: np.ndarray, gx: int, gy: int, min_area: int,
-) -> Optional[tuple[float, float, float, float]]:
-    """Bbox (frame px) of the largest connected component above ``min_area``."""
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(search, connectivity=8)
+    mask: np.ndarray, origin_x: int, origin_y: int, min_area: int,
+) -> Optional[Bbox]:
+    """Return the largest connected component's bbox (in frame px) or None."""
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n_labels <= 1:
         return None
     areas = stats[1:, cv2.CC_STAT_AREA]
     biggest = int(np.argmax(areas)) + 1
     if int(stats[biggest, cv2.CC_STAT_AREA]) < min_area:
         return None
-    ys, xs = np.nonzero(labels == biggest)
-    x0 = float(gx + np.percentile(xs, EDGE_TRIM_PCT))
-    x1 = float(gx + np.percentile(xs, 100 - EDGE_TRIM_PCT))
-    y0 = float(gy + np.percentile(ys, EDGE_TRIM_PCT))
-    y1 = float(gy + np.percentile(ys, 100 - EDGE_TRIM_PCT))
-    return (x0, y0, x1, y1)
+    x = origin_x + int(stats[biggest, cv2.CC_STAT_LEFT])
+    y = origin_y + int(stats[biggest, cv2.CC_STAT_TOP])
+    w = int(stats[biggest, cv2.CC_STAT_WIDTH])
+    h = int(stats[biggest, cv2.CC_STAT_HEIGHT])
+    return (x, y, w, h)
 
 
 def _locate_piece(
@@ -177,20 +179,14 @@ def _locate_piece(
     piece: Piece,
     baseline_gray: np.ndarray,
     search_mask: Optional[np.ndarray],
-) -> tuple[Optional[tuple[float, float, float, float]], float]:
-    """Localize the held piece by the *edges* of its largest motion blob.
+) -> tuple[Optional[Bbox], float]:
+    """Localize the held piece by its motion blob inside ``region``.
 
-    Detection runs over ``region`` (the board expanded toward the screen edges,
-    so a piece near a board edge isn't clipped), while ``cell_w/cell_h`` are the
-    *board* cell pixel sizes used for the shape template. Returns
-    ``((x0, y0, x1, y1), match_score)`` in *frame pixels*.
-
-    The caller chooses the mask via the distance gate: while travelling it
-    passes ``search_mask=None`` (full motion mask, so the piece isn't ignored);
-    near the target it passes the focus mask and we search *strictly* within it
-    — no fallback — so a near-complete row's glow can't be picked up instead.
+    Near the target the caller passes a ``search_mask`` (focus window ∩ empty
+    cells) so the glow on filled cells can't be picked up; while traveling it
+    passes ``None`` and the full motion mask is used.
     """
-    rx, ry = region[0], region[1]
+    region_x, region_y, _, _ = region
     current_gray = _board_gray(frame_bgr, region)
     search = _motion_mask(current_gray, baseline_gray)
 
@@ -204,19 +200,13 @@ def _locate_piece(
     if score < MATCH_SCORE_MIN:
         return None, score
 
-    # Restrict to the focus region/empty cells when asked (near target) —
-    # strictly, no fallback, so the glow on filled cells is never chosen.
     if search_mask is not None and search_mask.shape == search.shape:
         search = cv2.bitwise_and(search, search_mask)
 
-    # Noise floor scaled to the piece: a real held piece fills a sizeable
-    # fraction of its footprint; tiny flicker blobs fall well under this.
     expected_area = len(piece.cells) * cell_h * cell_w
     min_area = max(MIN_MOVED_PX, int(PIECE_AREA_FRAC * expected_area))
-    return _largest_blob_bbox(search, rx, ry, min_area), score
+    return _largest_blob_bbox(search, region_x, region_y, min_area), score
 
-
-# ── Motion / frame helpers ──────────────────────────────────────────────────
 
 def _move_smooth(session, to_dev, start_xy, end_xy) -> None:
     steps = max(1, MOVE_SUBSTEPS)
@@ -239,7 +229,61 @@ def _wait_frame(device: Device, last_fid: int, timeout_s: float):
     return None, last_fid
 
 
-# ── Public entrypoint ───────────────────────────────────────────────────────
+def _pd_step(
+    err_x: int, err_y: int,
+    prev_err_x: Optional[int], prev_err_y: Optional[int],
+    near_target: bool,
+) -> tuple[int, int]:
+    derr_x = 0 if prev_err_x is None else err_x - prev_err_x
+    derr_y = 0 if prev_err_y is None else err_y - prev_err_y
+    ctrl_x = (err_x + DERIV_GAIN * derr_x) / GAIN
+    ctrl_y = (err_y + DERIV_GAIN * derr_y) / GAIN
+    cap = FINE_STEP_PX if near_target else MAX_STEP_PX
+    return (
+        max(-cap, min(cap, int(ctrl_x))),
+        max(-cap, min(cap, int(ctrl_y))),
+    )
+
+
+def _boundary_override(
+    dx: int, dy: int, measured_bbox: Bbox, grid_bbox: Bbox,
+) -> tuple[int, int, bool]:
+    """If any piece corner drifts off the board, push it firmly back inward."""
+    gx, gy, gw, gh = grid_bbox
+    gx1, gy1 = gx + gw, gy + gh
+    tol = BOUNDARY_TOL_PX
+    corners = _five_points(measured_bbox)[1:]
+    breached = False
+    if any(px < gx - tol for px, _ in corners):
+        dx, breached = FINE_STEP_PX, True
+    elif any(px > gx1 + tol for px, _ in corners):
+        dx, breached = -FINE_STEP_PX, True
+    if any(py < gy - tol for _, py in corners):
+        dy, breached = FINE_STEP_PX, True
+    elif any(py > gy1 + tol for _, py in corners):
+        dy, breached = -FINE_STEP_PX, True
+    return dx, dy, breached
+
+
+def _unobserved_cells(
+    empty_mask: np.ndarray, grid_bbox: Bbox, obs_origin: tuple[int, int],
+    cell_w: float, cell_h: float,
+) -> list[Bbox]:
+    """Cells the focus mask excludes (mostly filled), in frame px (xywh)."""
+    gx, gy, _, _ = grid_bbox
+    ox, oy = obs_origin
+    cells: list[Bbox] = []
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            fx0 = gx + int(c * cell_w)
+            fx1 = gx + int((c + 1) * cell_w)
+            fy0 = gy + int(r * cell_h)
+            fy1 = gy + int((r + 1) * cell_h)
+            cell = empty_mask[fy0 - oy:fy1 - oy, fx0 - ox:fx1 - ox]
+            if cell.size and float(np.count_nonzero(cell)) / cell.size < 0.5:
+                cells.append((fx0, fy0, fx1 - fx0, fy1 - fy0))
+    return cells
+
 
 def place(
     *,
@@ -250,29 +294,37 @@ def place(
     frame_w: int,
     frame_h: int,
     on_debug: Optional[DebugSink] = None,
+    on_log: Optional[LogSink] = None,
 ) -> bool:
     """DOWN on the tray piece, servo it onto the suggested cells, UP.
 
     ``grid_bbox`` is the board region in frame pixels (analyzer ``board_bbox``)
-    and ``grab_px`` is where to press to pick the piece up (centre of the
-    detected tray piece). ``on_debug`` (if given) receives a :class:`ServoDebug`
-    each iteration for live GUI visualization, and ``None`` on exit. Returns
-    ``True`` on a confident, on-target release.
+    and ``grab_px`` is where to press to pick the piece up. ``on_debug`` (if
+    given) receives a :class:`ServoDebug` each iteration and ``None`` on exit.
+    ``on_log`` (if given) receives human-readable status lines (also printed).
+    Returns ``True`` on a confident, on-target release.
     """
-    def _publish(dbg: Optional[ServoDebug]) -> None:
-        if on_debug is not None:
-            try:
-                on_debug(dbg)
-            except Exception:  # noqa: BLE001 — debug must never break the servo
-                pass
+    def emit(msg: str) -> None:
+        print(msg)
+        if on_log is not None:
+            on_log(msg)
+
+    def publish(dbg: Optional[ServoDebug]) -> None:
+        if on_debug is None:
+            return
+        try:
+            on_debug(dbg)
+        except Exception:  # noqa: BLE001 — debug must never break the servo
+            pass
+
     serial = getattr(device, "_serial", None)
     if not serial:
-        print("[servo] device has no serial; cannot inject input")
+        emit("[servo] device has no serial; cannot inject input")
         return False
     try:
         dev_w, dev_h = device.screen_size()
     except Exception as exc:
-        print(f"[servo] screen_size failed: {exc}")
+        emit(f"[servo] screen_size failed: {exc}")
         return False
 
     dragger = get_scrcpy(serial, dev_w, dev_h)
@@ -290,66 +342,49 @@ def place(
     cell_h = gh / BOARD_SIZE
     cell_w_i = max(1, int(round(cell_w)))
     cell_h_i = max(1, int(round(cell_h)))
-    # Target footprint bounding box (edges) of the placement, in frame px.
-    piece = suggestion.piece
-    tgt_x0 = gx + suggestion.col * cell_w
-    tgt_y0 = gy + suggestion.row * cell_h
-    tgt_x1 = tgt_x0 + piece.cols * cell_w
-    tgt_y1 = tgt_y0 + piece.rows * cell_h
-    target_bbox = (int(tgt_x0), int(tgt_y0), int(tgt_x1), int(tgt_y1))
-    target_pts = _five_points(tgt_x0, tgt_y0, tgt_x1, tgt_y1)
 
-    # Observed region: the board expanded toward the screen edges, so a piece (or
-    # a target) near a board edge isn't clipped. All detection (baseline, motion,
-    # masks, blob coords) runs in this region; board cell math stays on grid_bbox.
-    ox0 = max(0, gx - OBSERVE_MARGIN_PX)
-    oy0 = max(0, gy - OBSERVE_MARGIN_PX)
-    ox1 = min(frame_w, gx + gw + OBSERVE_MARGIN_PX)
-    oy1 = min(frame_h, gy + gh + OBSERVE_MARGIN_PX)
-    obs_region = (ox0, oy0, ox1 - ox0, oy1 - oy0)
+    piece = suggestion.piece
+    tgt_x = int(gx + suggestion.col * cell_w)
+    tgt_y = int(gy + suggestion.row * cell_h)
+    tgt_w = int(piece.cols * cell_w)
+    tgt_h = int(piece.rows * cell_h)
+    target_bbox: Bbox = (tgt_x, tgt_y, tgt_w, tgt_h)
+    target_pts = _five_points(target_bbox)
+
+    # Detection runs over the entire frame so an edge target or piece isn't
+    # clipped by the board; board-cell math stays on grid_bbox.
+    obs_region: Bbox = (0, 0, frame_w, frame_h)
 
     pre_frame, _ = device.get_latest_with_id()
     if pre_frame is None:
-        print("[servo] no pre-grab frame available")
+        emit("[servo] no pre-grab frame available")
         return False
     baseline_gray = _board_gray(pre_frame, obs_region)
+    baseline_board = scan_board(pre_frame, grid_bbox)
     _, empty_mask = cv2.threshold(
         baseline_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
     )
 
-    # Local focus window around the target footprint (frame px), clamped to the
-    # observed region (which reaches toward the screen edges) — so the window can
-    # extend beyond the board when the target sits on an edge. Near the target we
-    # search only here (∩ empty cells).
-    roi_x0 = max(ox0, int(tgt_x0) - ROI_MARGIN_PX)
-    roi_y0 = max(oy0, int(tgt_y0) - ROI_MARGIN_PX)
-    roi_x1 = min(ox1, int(tgt_x1) + ROI_MARGIN_PX)
-    roi_y1 = min(oy1, int(tgt_y1) + ROI_MARGIN_PX)
-    roi_frame = (roi_x0, roi_y0, roi_x1, roi_y1)
+    # Local focus window around the target (clamped to the frame); near the
+    # target we search only here ∩ empty cells.
+    roi_x = max(0, tgt_x - ROI_MARGIN_PX)
+    roi_y = max(0, tgt_y - ROI_MARGIN_PX)
+    roi_x1 = min(frame_w, tgt_x + tgt_w + ROI_MARGIN_PX)
+    roi_y1 = min(frame_h, tgt_y + tgt_h + ROI_MARGIN_PX)
+    roi_bbox: Bbox = (roi_x, roi_y, roi_x1 - roi_x, roi_y1 - roi_y)
     roi_mask = np.zeros_like(empty_mask)
-    roi_mask[roi_y0 - oy0:roi_y1 - oy0, roi_x0 - ox0:roi_x1 - ox0] = 255
+    roi_mask[roi_y:roi_y1, roi_x:roi_x1] = 255
     focus_mask = cv2.bitwise_and(empty_mask, roi_mask)
 
-    # Per-cell split (for the debug overlay): cells that are mostly filled are
-    # the ones board-aware mode stops observing near the target. Sampled from
-    # empty_mask at obs-region-relative coordinates.
-    unobserved_cells: list[tuple[int, int, int, int]] = []
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            fx0, fx1 = gx + int(c * cell_w), gx + int((c + 1) * cell_w)
-            fy0, fy1 = gy + int(r * cell_h), gy + int((r + 1) * cell_h)
-            cell = empty_mask[fy0 - oy0:fy1 - oy0, fx0 - ox0:fx1 - ox0]
-            if cell.size and float(np.count_nonzero(cell)) / cell.size < 0.5:
-                unobserved_cells.append(
-                    (fx0, fy0, fx1, fy1)
-                )
+    unobserved_cells = _unobserved_cells(
+        empty_mask, grid_bbox, (0, 0), cell_w, cell_h,
+    )
 
     try:
         with dragger.open_session() as session:
             session.down(*to_dev(grab_px))
             time.sleep(HOLD_MS / 1000)
 
-            # Dither the initial x so a retry doesn't repeat the same path.
             jitter = random.randint(-START_NOISE_X_PX, START_NOISE_X_PX)
             finger = (grab_px[0] + jitter, grab_px[1] - INITIAL_LIFT_PX)
             _move_smooth(session, to_dev, grab_px, finger)
@@ -357,6 +392,7 @@ def place(
 
             deadline = time.monotonic() + MAX_LOOP_S
             no_piece = 0
+            recon_streak = 0
             iters = 0
             prev_err_x: Optional[int] = None
             prev_err_y: Optional[int] = None
@@ -369,88 +405,64 @@ def place(
                     continue
                 last_fid = fid
 
-                # Board-aware glow suppression only kicks in near the target;
-                # while travelling we track with the full motion mask so the
-                # piece (passing over filled cells) is never ignored.
-                # Focus on the local target window (empty cells only) once the
-                # *piece* (last measured error) is close; while it's still far /
-                # unmeasured, scan the whole board so the travelling piece isn't
-                # lost. Gating on the piece error — not the finger — avoids the
-                # render-lift offset between finger and piece.
-                near_target = (
-                    prev_err_x is not None
-                    and (prev_err_x ** 2 + prev_err_y ** 2) <= APPROACH_RADIUS_PX ** 2
-                )
-                observe_kw = dict(
-                    observe_bbox=roi_frame if near_target else grid_bbox,
-                    board_aware=near_target,
-                    unobserved_cells=unobserved_cells if near_target else [],
-                )
-                measured_bbox, score = _locate_piece(
-                    frame, obs_region, cell_w_i, cell_h_i, suggestion.piece,
-                    baseline_gray, focus_mask if near_target else None,
-                )
-                if measured_bbox is None:
-                    _publish(ServoDebug(
-                        target_bbox=target_bbox, finger_px=finger, score=score,
-                        status="SEARCHING FOR PIECE…", **observe_kw,
+                current_board = scan_board(frame, grid_bbox)
+                if _footprint_filled(
+                    baseline_board, current_board, piece,
+                    suggestion.row, suggestion.col,
+                ):
+                    recon_streak += 1
+                else:
+                    recon_streak = 0
+
+                if recon_streak >= RECON_LOCK_FRAMES:
+                    publish(ServoDebug(
+                        target_bbox=target_bbox, finger_px=finger,
+                        observe_bbox=grid_bbox, locked=True,
+                        status="BOARD LOCK — RELEASING",
                     ))
-                    no_piece += 1
-                    if no_piece >= MAX_NO_PIECE_FRAMES:
-                        print(f"[servo] lost piece after {iters} iters; aborting")
-                        time.sleep(PRE_LIFT_MS / 1000)
-                        session.up()
-                        return False
-                    continue
-                no_piece = 0
-
-                mx0, my0, mx1, my1 = measured_bbox
-                measured_bbox_int = (int(mx0), int(my0), int(mx1), int(my1))
-                # 5-point correspondence (centre + 4 corners): the error is the
-                # mean of target_i − measured_i over all five reference points.
-                measured_pts = _five_points(mx0, my0, mx1, my1)
-                err_x = int(sum(t[0] - m[0] for t, m in zip(target_pts, measured_pts)) / 5)
-                err_y = int(sum(t[1] - m[1] for t, m in zip(target_pts, measured_pts)) / 5)
-
-                locked = (abs(err_x) <= LOCK_TOL_PX and abs(err_y) <= LOCK_TOL_PX
-                          and score >= LOCK_SCORE_MIN)
-
-                if locked:
-                    _publish(ServoDebug(
-                        target_bbox=target_bbox, measured_bbox=measured_bbox_int,
-                        target_pts=target_pts, measured_pts=measured_pts,
-                        finger_px=finger, err_px=(err_x, err_y),
-                        score=score, locked=True,
-                        status="LOCKED — RELEASING", **observe_kw,
-                    ))
-                    print(f"[servo {iters}] LOCK err=({err_x:+d},{err_y:+d}) "
-                          f"score={score:.2f}")
+                    emit(f"[servo {iters}] BOARD LOCK (recon, {recon_streak} frames)")
                     time.sleep(PRE_LIFT_MS / 1000)
                     session.up()
                     return True
 
-                derr_x = 0 if prev_err_x is None else err_x - prev_err_x
-                derr_y = 0 if prev_err_y is None else err_y - prev_err_y
-                ctrl_x = (err_x + DERIV_GAIN * derr_x) / GAIN
-                ctrl_y = (err_y + DERIV_GAIN * derr_y) / GAIN
-                # Careful near the target: cap each axis tighter once focused.
-                cap = FINE_STEP_PX if near_target else MAX_STEP_PX
-                dx = max(-cap, min(cap, int(ctrl_x)))
-                dy = max(-cap, min(cap, int(ctrl_y)))
+                # Gate board-aware focus on the *piece* error (not the finger),
+                # so render lift between finger and piece doesn't shift modes
+                # prematurely. While traveling we keep the full mask so a piece
+                # crossing filled cells isn't ignored.
+                near_target = (
+                    prev_err_x is not None
+                    and (prev_err_x ** 2 + prev_err_y ** 2) <= APPROACH_RADIUS_PX ** 2
+                )
+                observe_bbox = roi_bbox if near_target else grid_bbox
 
-                # Containment: if the piece's centre drifts off the board, override
-                # the step to drive it firmly back inward (toward the board).
-                mcx = (mx0 + mx1) / 2
-                mcy = (my0 + my1) / 2
-                breached = False
-                if mcx < gx:
-                    dx = MAX_STEP_PX; breached = True
-                elif mcx > gx + gw:
-                    dx = -MAX_STEP_PX; breached = True
-                if mcy < gy:
-                    dy = MAX_STEP_PX; breached = True
-                elif mcy > gy + gh:
-                    dy = -MAX_STEP_PX; breached = True
+                measured_bbox, score = _locate_piece(
+                    frame, obs_region, cell_w_i, cell_h_i, piece,
+                    baseline_gray, focus_mask if near_target else None,
+                )
+                if measured_bbox is None:
+                    publish(ServoDebug(
+                        target_bbox=target_bbox, finger_px=finger, score=score,
+                        observe_bbox=observe_bbox, board_aware=near_target,
+                        unobserved_cells=unobserved_cells if near_target else [],
+                        status="SEARCHING FOR PIECE…",
+                    ))
+                    if recon_streak == 0:
+                        no_piece += 1
+                        if no_piece >= MAX_NO_PIECE_FRAMES:
+                            emit(f"[servo] lost piece after {iters} iters; aborting")
+                            time.sleep(PRE_LIFT_MS / 1000)
+                            session.up()
+                            return False
+                    continue
+                no_piece = 0
+
+                # 5-point correspondence: error is the mean of target_i − measured_i.
+                measured_pts = _five_points(measured_bbox)
+                err_x = int(sum(t[0] - m[0] for t, m in zip(target_pts, measured_pts)) / 5)
+                err_y = int(sum(t[1] - m[1] for t, m in zip(target_pts, measured_pts)) / 5)
+
+                dx, dy = _pd_step(err_x, err_y, prev_err_x, prev_err_y, near_target)
+                dx, dy, breached = _boundary_override(dx, dy, measured_bbox, grid_bbox)
 
                 if breached:
                     status = "BOUNDARY HIT — PUSHING BACK"
@@ -460,23 +472,23 @@ def place(
                     status = "TRAVELING"
 
                 next_finger = (finger[0] + dx, finger[1] + dy)
-                _publish(ServoDebug(
-                    target_bbox=target_bbox, measured_bbox=measured_bbox_int,
+                publish(ServoDebug(
+                    target_bbox=target_bbox, measured_bbox=measured_bbox,
                     target_pts=target_pts, measured_pts=measured_pts,
                     finger_px=finger, err_px=(err_x, err_y),
                     step_px=(dx, dy), score=score, locked=False,
-                    status=status, **observe_kw,
+                    observe_bbox=observe_bbox, board_aware=near_target,
+                    unobserved_cells=unobserved_cells if near_target else [],
+                    status=status,
                 ))
-                print(f"[servo {iters}] err=({err_x:+d},{err_y:+d}) "
-                      f"score={score:.2f} step=({dx:+d},{dy:+d})")
                 prev_err_x, prev_err_y = err_x, err_y
                 _move_smooth(session, to_dev, finger, next_finger)
                 finger = next_finger
                 time.sleep(SETTLE_MS / 1000)
 
-            print(f"[servo] budget exceeded after {iters} iters; lifting in place")
+            emit(f"[servo] budget exceeded after {iters} iters; lifting in place")
             time.sleep(PRE_LIFT_MS / 1000)
             session.up()
             return False
     finally:
-        _publish(None)
+        publish(None)
