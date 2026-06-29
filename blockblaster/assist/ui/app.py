@@ -40,7 +40,7 @@ from blockblaster.control.device import Device, device_status_detail
 
 _TARGET_FPS = 60
 _AUTO_POST_PLACE_S = 1.5
-_AUTO_RETRY_DELAY_S = 0.5
+_AUTO_RETRY_DELAY_S = 1.0
 _AUTO_RECALIBRATE_FAILS = 3
 _SERVO_ANALYSIS_HOLD_S = 86400.0  # until servo ok; then replaced with _AUTO_POST_PLACE_S
 
