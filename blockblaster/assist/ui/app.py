@@ -165,8 +165,6 @@ def _maybe_dispatch_servo(device: Device, state: AppState, snap, analyzer: Analy
                 state.auto_next_after = now + _AUTO_RETRY_DELAY_S
                 if state.consecutive_servo_fails >= _AUTO_RECALIBRATE_FAILS:
                     state.consecutive_servo_fails = 0
-                    state.await_fresh_suggestion = False
-                    state.placed_suggestion_key = None
                     state.recalibrate_after = now + _AUTO_RETRY_DELAY_S
                     state.auto_next_after = state.recalibrate_after
                     append_log(
@@ -259,10 +257,15 @@ def run(
 
         if state.reset_analysis_request:
             state.reset_analysis_request = False
+            analyzer.set_pause_until(0.0)
             analyzer.reset_analysis()
+            analyzer.reset_debounce()
             diff_tracker.clear_suggestion()
             state.board_override = None  # revert to auto-detection
-            append_log(state.log_lines, "[analyzer] reset — board/suggestion/board-cache cleared")
+            state.await_fresh_suggestion = False
+            state.placed_suggestion_key = None
+            append_log(state.log_lines, "[recalibrate] board/suggestion cache cleared")
+            snap = analyzer.snapshot()
 
         analyzer.set_board_override(state.board_override)
         state.phone_map = _phone_map(state.frame_w, state.frame_h)

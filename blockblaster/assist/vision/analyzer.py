@@ -84,6 +84,7 @@ class AnalysisWorker:
         self._confirmed_board: Optional[np.ndarray] = None
         self._confirmed_queue: Optional[tuple] = None
         self._pause_until: float = 0.0
+        self._force_reanalyze: bool = False
 
         # Manual board-region override (frame px (x,y,w,h)); when set, it is used
         # for board scanning/suggestion instead of the auto-detected board.
@@ -157,11 +158,19 @@ class AnalysisWorker:
         """Drop all latched state so the next frame is analysed fresh.
 
         Clears the held suggestion, candidate/confirmed board, advisor cache,
-        and detected-board cache — invoked after a manual board change or a
-        detection that drifted.
+        detected-board cache, and the published snapshot so the UI reflects the
+        reset immediately.
         """
         with self._lock:
             self._reset_latches()
+            self._snap = dataclasses.replace(
+                self._snap,
+                suggestion=None,
+                board_bbox=None,
+                board_grid=np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool),
+                pieces=[],
+            )
+            self._force_reanalyze = True
         self._advisor.clear_cache()
         reset_board_cache()
 
@@ -203,6 +212,11 @@ class AnalysisWorker:
             if in_event:
                 in_event = False
                 last_seen_id = -1
+
+            with self._lock:
+                if self._force_reanalyze:
+                    self._force_reanalyze = False
+                    last_seen_id = -1
 
             if frame_id == last_seen_id:
                 time.sleep(self._IDLE_SLEEP)
