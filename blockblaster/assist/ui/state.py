@@ -29,6 +29,7 @@ class AppState:
     servo_debug: Optional[ServoDebug] = None
     reset_analysis_request: bool = False
     consecutive_servo_fails: int = 0
+    recalibrate_after: float = 0.0
     log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_MAX_LINES))
     log_scroll: int = 0  # wrapped lines scrolled up from the bottom (0 = follow tail)
     log_rect: pygame.Rect = field(default_factory=pygame.Rect)

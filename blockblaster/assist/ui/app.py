@@ -56,6 +56,8 @@ def _autoplay_ready(
         return False
     if snap.suggestion is None:
         return False
+    if state.recalibrate_after > 0 and now < state.recalibrate_after:
+        return False
     if state.await_fresh_suggestion:
         if analyzer.analysis_paused(now):
             return False
@@ -165,11 +167,12 @@ def _maybe_dispatch_servo(device: Device, state: AppState, snap, analyzer: Analy
                     state.consecutive_servo_fails = 0
                     state.await_fresh_suggestion = False
                     state.placed_suggestion_key = None
-                    analyzer.set_pause_until(0.0)
-                    state.reset_analysis_request = True
+                    state.recalibrate_after = now + _AUTO_RETRY_DELAY_S
+                    state.auto_next_after = state.recalibrate_after
                     append_log(
                         state.log_lines,
-                        f"[auto] {_AUTO_RECALIBRATE_FAILS} servo fails — recalibrating",
+                        f"[auto] {_AUTO_RECALIBRATE_FAILS} servo fails — recalibrating in "
+                        f"{_AUTO_RETRY_DELAY_S:.1f}s",
                     )
             state.servo_busy = False
             state.servo_debug = None
@@ -248,6 +251,11 @@ def run(
 
         snap = analyzer.snapshot()
         diff_tracker.set_suggestion(snap.suggestion, snap.board_bbox)
+
+        if state.recalibrate_after > 0 and now >= state.recalibrate_after:
+            state.recalibrate_after = 0.0
+            analyzer.set_pause_until(0.0)
+            state.reset_analysis_request = True
 
         if state.reset_analysis_request:
             state.reset_analysis_request = False

@@ -32,10 +32,14 @@ from blockblaster.control.scrcpy_control import get_scrcpy
 from blockblaster.game.pieces import Piece
 
 # Grab / gesture timing
-HOLD_MS              = 240
-PRE_LIFT_MS          = 260
-INITIAL_LIFT_PX      = 150
-START_NOISE_X_PX     = 30
+HOLD_MS                  = 240
+PRE_LIFT_MS              = 260
+INITIAL_LIFT_PX          = 150
+MIN_INITIAL_LIFT_PX      = 70
+INITIAL_LIFT_SETTLE_MS   = 150
+INITIAL_LIFT_SUBSTEPS    = 8
+INITIAL_LIFT_SUBSTEP_MS  = 12
+START_NOISE_X_PX         = 30
 
 # Loop pacing
 MAX_LOOP_S           = 5.0
@@ -208,15 +212,34 @@ def _locate_piece(
     return _largest_blob_bbox(search, region_x, region_y, min_area), score
 
 
-def _move_smooth(session, to_dev, start_xy, end_xy) -> None:
-    steps = max(1, MOVE_SUBSTEPS)
-    for i in range(1, steps + 1):
-        t = i / steps
+def _move_smooth(
+    session, to_dev, start_xy, end_xy, *,
+    steps: Optional[int] = None,
+    substep_ms: Optional[int] = None,
+) -> None:
+    n = max(1, steps if steps is not None else MOVE_SUBSTEPS)
+    pause_ms = substep_ms if substep_ms is not None else MOVE_SUBSTEP_MS
+    for i in range(1, n + 1):
+        t = i / n
         x = int(round(start_xy[0] + (end_xy[0] - start_xy[0]) * t))
         y = int(round(start_xy[1] + (end_xy[1] - start_xy[1]) * t))
         session.move(*to_dev((x, y)))
-        if i < steps and MOVE_SUBSTEP_MS > 0:
-            time.sleep(MOVE_SUBSTEP_MS / 1000)
+        if i < n and pause_ms > 0:
+            time.sleep(pause_ms / 1000)
+
+
+def _initial_lift_px(target_bbox: Bbox, grid_bbox: Bbox) -> int:
+    """Less upward lift when the target sits on the bottom rows near the tray."""
+    tgt_cy = target_bbox[1] + target_bbox[3] / 2
+    gy, gh = grid_bbox[1], grid_bbox[3]
+    if gh <= 0:
+        return INITIAL_LIFT_PX
+    board_pos = (tgt_cy - gy) / gh
+    if board_pos <= 0.5:
+        return INITIAL_LIFT_PX
+    t = min(1.0, (board_pos - 0.5) / 0.5)
+    scale = 1.0 - 0.5 * t
+    return max(MIN_INITIAL_LIFT_PX, int(INITIAL_LIFT_PX * scale))
 
 
 def _wait_frame(device: Device, last_fid: int, timeout_s: float):
@@ -386,9 +409,14 @@ def place(
             time.sleep(HOLD_MS / 1000)
 
             jitter = random.randint(-START_NOISE_X_PX, START_NOISE_X_PX)
-            finger = (grab_px[0] + jitter, grab_px[1] - INITIAL_LIFT_PX)
-            _move_smooth(session, to_dev, grab_px, finger)
-            time.sleep(SETTLE_MS / 1000)
+            lift_px = _initial_lift_px(target_bbox, grid_bbox)
+            finger = (grab_px[0] + jitter, grab_px[1] - lift_px)
+            _move_smooth(
+                session, to_dev, grab_px, finger,
+                steps=INITIAL_LIFT_SUBSTEPS,
+                substep_ms=INITIAL_LIFT_SUBSTEP_MS,
+            )
+            time.sleep(INITIAL_LIFT_SETTLE_MS / 1000)
 
             deadline = time.monotonic() + MAX_LOOP_S
             no_piece = 0
