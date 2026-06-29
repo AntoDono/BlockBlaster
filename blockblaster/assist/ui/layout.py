@@ -51,8 +51,16 @@ CONTROLS_RECT = pygame.Rect(0, STATUS_RECT.bottom, WIN_W, CONTROLS_H)
 BG_COLOR = (14, 14, 20)
 
 
-def make_window() -> pygame.Surface:
-    """Create and return the main pygame surface."""
-    screen = pygame.display.set_mode((WIN_W, WIN_H))
+def make_window(fullscreen: bool = True) -> pygame.Surface:
+    """Create and return the main pygame surface.
+
+    Uses the SCALED flag so the fixed ``WIN_W × WIN_H`` logical layout is scaled
+    to fill the display (letterboxed to preserve aspect). SCALED also maps mouse
+    events back to logical coordinates, so the board-edit drag math is unchanged.
+    """
+    flags = pygame.SCALED
+    if fullscreen:
+        flags |= pygame.FULLSCREEN
+    screen = pygame.display.set_mode((WIN_W, WIN_H), flags)
     pygame.display.set_caption("Block Blast – Assist")
     return screen

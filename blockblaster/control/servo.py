@@ -38,7 +38,7 @@ from blockblaster.game.pieces import Piece
 HOLD_MS              = 240   # dwell after DOWN before any MOVE (long-press grab)
 PRE_LIFT_MS          = 260   # settle before UP so the game commits the place
 INITIAL_LIFT_PX      = 150    # initial upward nudge so the piece pops above finger
-START_NOISE_X_PX     = 45    # random ± x jitter on the initial lift, so a retry
+START_NOISE_X_PX     = 30    # random ± x jitter on the initial lift, so a retry
                              # doesn't deterministically repeat the same bad path
 # ── Loop pacing ───────────────────────────────────────────────────────────
 MAX_LOOP_S           = 7.0   # total servo budget per placement
@@ -48,7 +48,7 @@ MAX_NO_PIECE_FRAMES  = 12    # consecutive no-detect frames before aborting
 # ── PD controller ─────────────────────────────────────────────────────────
 GAIN                 = 0.7   # P term: piece-px per finger-px (smaller = bigger steps)
 DERIV_GAIN           = 1.8   # D term: damps overshoot
-MAX_STEP_PX          = 70    # per-iter step clamp while travelling (coarse)
+MAX_STEP_PX          = 50    # per-iter step clamp while travelling (coarse)
 FINE_STEP_PX         = 10     # tighter per-iter clamp once within APPROACH_RADIUS
                              # — small careful nudges near the target, no overshoot
 MOVE_SUBSTEPS        = 4     # interpolate each step into N touch-MOVEs
@@ -114,6 +114,7 @@ class ServoDebug:
     step_px: tuple[int, int] = (0, 0)   # correction applied to the finger this iter
     score: float = 0.0
     locked: bool = False
+    status: str = ""   # human-readable phase/event for the GUI banner
 
 
 DebugSink = Callable[[Optional[ServoDebug]], None]
@@ -392,7 +393,7 @@ def place(
                 if measured_bbox is None:
                     _publish(ServoDebug(
                         target_bbox=target_bbox, finger_px=finger, score=score,
-                        **observe_kw,
+                        status="SEARCHING FOR PIECE…", **observe_kw,
                     ))
                     no_piece += 1
                     if no_piece >= MAX_NO_PIECE_FRAMES:
@@ -419,7 +420,8 @@ def place(
                         target_bbox=target_bbox, measured_bbox=measured_bbox_int,
                         target_pts=target_pts, measured_pts=measured_pts,
                         finger_px=finger, err_px=(err_x, err_y),
-                        score=score, locked=True, **observe_kw,
+                        score=score, locked=True,
+                        status="LOCKED — RELEASING", **observe_kw,
                     ))
                     print(f"[servo {iters}] LOCK err=({err_x:+d},{err_y:+d}) "
                           f"score={score:.2f}")
@@ -435,12 +437,35 @@ def place(
                 cap = FINE_STEP_PX if near_target else MAX_STEP_PX
                 dx = max(-cap, min(cap, int(ctrl_x)))
                 dy = max(-cap, min(cap, int(ctrl_y)))
+
+                # Containment: if the piece's centre drifts off the board, override
+                # the step to drive it firmly back inward (toward the board).
+                mcx = (mx0 + mx1) / 2
+                mcy = (my0 + my1) / 2
+                breached = False
+                if mcx < gx:
+                    dx = MAX_STEP_PX; breached = True
+                elif mcx > gx + gw:
+                    dx = -MAX_STEP_PX; breached = True
+                if mcy < gy:
+                    dy = MAX_STEP_PX; breached = True
+                elif mcy > gy + gh:
+                    dy = -MAX_STEP_PX; breached = True
+
+                if breached:
+                    status = "BOUNDARY HIT — PUSHING BACK"
+                elif near_target:
+                    status = "FOCUSED — FINE APPROACH"
+                else:
+                    status = "TRAVELING"
+
                 next_finger = (finger[0] + dx, finger[1] + dy)
                 _publish(ServoDebug(
                     target_bbox=target_bbox, measured_bbox=measured_bbox_int,
                     target_pts=target_pts, measured_pts=measured_pts,
                     finger_px=finger, err_px=(err_x, err_y),
-                    step_px=(dx, dy), score=score, locked=False, **observe_kw,
+                    step_px=(dx, dy), score=score, locked=False,
+                    status=status, **observe_kw,
                 ))
                 print(f"[servo {iters}] err=({err_x:+d},{err_y:+d}) "
                       f"score={score:.2f} step=({dx:+d},{dy:+d})")

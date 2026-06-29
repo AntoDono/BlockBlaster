@@ -26,6 +26,7 @@ def draw_controls_panel(
     autoplay_on: bool = False,
     servo_busy: bool = False,
     show_debug: bool = False,
+    edit_board: bool = False,
 ) -> dict[str, pygame.Rect]:
     """Draw clickable chip-buttons and return their screen rects.
 
@@ -43,6 +44,7 @@ def draw_controls_panel(
     chips: list[tuple[str, str, tuple[int, int, int], bool]] = [
         ("autoplay",    autoplay_label,    _GREEN, autoplay_on),
         ("debug",       "Debug [D]",       _GOLD,  show_debug),
+        ("editboard",   "Edit Board [E]",  _GOLD,  edit_board),
         ("recalibrate", "Recalibrate [R]", _WHITE, False),
         ("screenshot",  "Screenshot [S]",  _WHITE, False),
         ("quit",        "Quit  [Q]",       _RED,   False),

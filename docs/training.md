@@ -1,74 +1,83 @@
-# Training the Value Network
+# Training
 
 [← back to README](../README.md)
 
-For the algorithm side (state encoding, n-step TD targets, target network,
-reward shaping, paired champion/challenger evaluation) see
-[algorithm.md](algorithm.md). For knobs see
-[hyperparameters.md](hyperparameters.md).
+The agent improves through an iterative **self-play → fit → promote** loop driven by [`run_loop.py`](../run_loop.py). The individual stages ([`simulate.py`](../simulate.py), [`train.py`](../train.py)) are also runnable on their own.
 
-## Install
+## The loop
 
 ```bash
-uv sync
+uv run run_loop.py --rounds 10
 ```
 
-## Step 1 — Generate simulations
+Each round:
 
-```bash
-uv run simulate.py
+1. **Simulate** — generate self-play episodes into `simulations/` (trimmed to `MAX_SIMULATIONS`, oldest deleted).
+   - **Data-collection round:** the **champion** (`best_value_net.pt`) plays `NUM_SIMULATIONS` episodes with a per-round-varied master seed and softmax exploration (`SIM_TEMPERATURE`), adding fresh state diversity to the buffer.
+   - **Eval round** (every `EVAL_INTERVAL` rounds): a **paired champion-vs-challenger** evaluation (see below).
+2. **Train** — [`train.py`](../train.py) fits the net on *all* episodes currently in `simulations/` and writes the **challenger** checkpoint `value_net.pt`.
+
+So `simulations/` is a rolling replay buffer, and each train run is warm-started from the last challenger weights.
+
+## Champion / challenger promotion
+
+Two checkpoints:
+
+- `checkpoints/value_net.pt` — **challenger**, written by every training run.
+- `checkpoints/best_value_net.pt` — **champion**, what simulation and the live advisor actually use.
+
+On an eval round, [`run_loop._paired_eval_round`](../run_loop.py) runs **both** nets on the **same** per-episode seeds (derived deterministically from `EVAL_SEEDS`) so piece-stream luck cancels. The challenger is promoted to champion only if:
+
+- it beats the champion's per-seed **median** on ≥ `PROMOTION_SEED_WIN_FRACTION` of seeds, **and**
+- its overall median exceeds the champion's by ≥ `PROMOTION_MEDIAN_MARGIN` (fractional).
+
+Bootstrap: if no champion exists yet, the challenger is promoted unconditionally.
+
+```mermaid
+flowchart TD
+    A["champion plays<br/>(data collection)"] --> B["episodes → simulations/"]
+    B --> C["train → value_net.pt (challenger)"]
+    C --> D{"eval round?"}
+    D -- no --> A
+    D -- yes --> E["paired eval on EVAL_SEEDS"]
+    E --> F{"wins gate?"}
+    F -- yes --> G["promote → best_value_net.pt"]
+    F -- no --> H["keep champion"]
+    G --> A
+    H --> A
 ```
 
-Creates `simulations/ep_*.json` (`NUM_SIMULATIONS` episodes per round). If no
-checkpoint exists yet, a **random** policy is used.
+## Checkpoint resolution during simulation
 
-## Step 2 — Train
+[`sim/runner.run_simulations`](../blockblaster/sim/runner.py) resolves which weights to load once per round and threads it to every worker:
 
-```bash
-uv run train.py
-```
+- explicit `sim_path_override` (used by the champion arm of eval), else
+- `force_checkpoint=True` → the challenger, else
+- the champion, falling back to challenger then a random policy on the very first rounds.
 
-Loads all episodes in `simulations/`, builds per-step n-step TD samples
-(`s_t`, `s_{t+n}`, partial reward sums), trains `v(s)` against targets
-bootstrapped off a periodically-refreshed target network, and saves the best
-checkpoint to `checkpoints/value_net.pt`. Prints hyperparameters and
-per-epoch train/test loss. See
-[algorithm.md → n-step TD training pipeline](algorithm.md#n-step-td-training-pipeline)
-for the target math and `TD_N_STEP` / `TARGET_REFRESH_BATCHES` in
-[hyperparameters.md](hyperparameters.md) for the relevant knobs.
-
-## Step 3 — Repeat (optional, improves quality)
-
-```bash
-uv run simulate.py   # now uses trained checkpoint + ε-exploration
-uv run train.py      # fit again on the expanded dataset
-# ... repeat as desired ...
-```
-
-This is the simulate → train loop described in
-[algorithm.md → n-step TD training pipeline](algorithm.md#n-step-td-training-pipeline);
-paired multi-seed champion/challenger evaluation is described in
-[algorithm.md → Champion / challenger checkpointing](algorithm.md#champion--challenger-checkpointing).
-
-## Step 4 — Watch the agent play
-
-```bash
-uv run main.py
-```
-
-Opens a pygame window. The agent auto-plays using the trained value network.
-
-| Key | Action |
-|-----|--------|
-| `SPACE` | Pause / resume |
-| `R` | Reset the game |
-| `Q` / `ESC` | Quit |
+Episodes run across `SIM_WORKERS` processes (spawn context, CUDA-safe).
 
 ## Generated files
 
-| Path | Description |
-|------|-------------|
-| `simulations/ep_*.json` | Episode trajectories (git-ignored) |
-| `checkpoints/value_net.pt` | **Challenger** — latest training checkpoint, updated every train round; loaded by sim on eval rounds (git-ignored) |
-| `checkpoints/best_value_net.pt` | **Champion** — stable simulation policy; loaded by sim on normal rounds; only updated when the challenger beats it in an eval round (git-ignored) |
-| `piece_cnn.pt` | Queue piece classifier weights, trained on synthetic data (git-ignored) — see [assist-gui.md → Piece classifier](assist-gui.md#piece-classifier) |
+| Path | Written by | Contents |
+|------|------------|----------|
+| `simulations/*.json` | `sim/io.write_episode` | per-episode trajectory (board, queue, reward per step) |
+| `checkpoints/value_net.pt` | `train/trainer` | challenger weights + epoch / best-test-loss meta |
+| `checkpoints/best_value_net.pt` | `run_loop` | champion snapshot (copied from challenger on promotion) |
+
+## Watching it play
+
+```bash
+uv run main.py --seed 0
+```
+
+Loads the champion (falls back to a random policy with a printed warning if no checkpoint exists) and runs the offline pygame demo at a fixed seed.
+
+## Standalone stages
+
+```bash
+uv run simulate.py   # one batch of episodes with the resolved checkpoint
+uv run train.py      # one fit over the current simulations/ buffer
+```
+
+All behaviour is controlled by [`param.py`](../param.py) — see [hyperparameters.md](hyperparameters.md).

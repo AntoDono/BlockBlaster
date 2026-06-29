@@ -1,4 +1,4 @@
-# Project Architecture
+# Architecture
 
 [← back to README](../README.md)
 
@@ -6,106 +6,88 @@
 
 ```
 BlockBlaster/
-  param.py             # all hyperparameters (single source of truth) — see hyperparameters.md
-  simulate.py          # run N episodes → save JSON trajectories
-  train.py             # load trajectories, fit v(s), save checkpoint
-  train_piece_cnn.py   # synth-data trainer for the queue piece classifier
-  main.py              # pygame demo using the trained agent
-  assist.py            # live phone-mirror assist GUI (legacy entry point)
-  play.py              # unified entry: ios assist / android assist / android auto-play
-  simulations/         # generated — one JSON file per episode (git-ignored)
-  checkpoints/         # generated — value_net.pt (git-ignored)
-  piece_cnn.pt         # generated — queue piece classifier weights (git-ignored)
+  param.py             # all RL/sim/training hyperparameters (single source of truth)
+  simulate.py          # run NUM_SIMULATIONS episodes → JSON trajectories
+  train.py             # fit the value net on stored trajectories
+  run_loop.py          # alternating simulate → train loop with promotion gate
+  main.py              # offline pygame demo with the trained agent
+  play.py              # live assist GUI launcher (ios / android)
+  train_piece_cnn.py   # synthetic + real data trainer for the piece classifier
+  eval_recognizers.py  # compare geometric vs CNN piece recognition on data/pieces/
+  eval_heldout.py      # honest held-out CNN accuracy on the real-crop split
+
+  simulations/         # generated — one JSON per episode (trimmed to MAX_SIMULATIONS)
+  checkpoints/         # generated — value_net.pt (challenger) + best_value_net.pt (champion)
+  piece_cnn.pt         # generated — piece classifier weights
+  data/pieces/<label>/ # collected real piece crops (one folder per piece)
+
   blockblaster/
-    game/              # rules engine (board, pieces, scoring, potential, env)
-    model/             # encoder + value CNN + checkpoint I/O
-    agent/             # greedy + beam-search policy
-    sim/               # rollout, episode I/O, multi-process runner
-    train/             # dataset (MC returns + D4 aug), trainer, logger
-    gui/               # standalone pygame app for offline play
-    piece_cnn/         # queue piece classifier (synth renderer + CNN + inference)
-    assist/            # live-mirror assist GUI (board + queue scanner, advisor, overlays)
-    control/           # device I/O: ADB, scrcpy, visual servo, auto-player loop
+    game/    model/    agent/    sim/    train/    piece_cnn/    gui/
+    assist/  control/
 ```
 
-## Per-subpackage maps
+## Two halves
 
-### `blockblaster/game/`
+The project splits cleanly into an **offline RL half** and a **live phone half**, joined only by the trained value-net checkpoint.
 
-```
-pieces.py       # 42 piece definitions + sampling
-board.py        # Board: place, clear lines, can_place, is_game_over
-scoring.py      # reward = cells placed + line bonus + multi-clear bonus
-potential.py    # Phi(s) for potential-based reward shaping
-env.py          # BlockBlastEnv: reset / step / clone / legal_actions
-```
-
-### `blockblaster/model/`
+### Offline RL (trains `v(s)`)
 
 ```
-encoder.py      # (board, queue) → (4, 8, 8) float tensor
-value_net.py    # small CNN → scalar value
-checkpoint.py   # save / load (incl. Adam optimizer state)
+game/                      model/                 agent/
+  pieces.py  42 pieces       encoder.py  state→tensor   policy.py  beam search
+  board.py   place/clear     value_net.py  CNN→scalar
+  scoring.py reward           checkpoint.py save/load
+  potential.py Φ(s)
+  env.py     reset/step/legal_actions
+
+sim/                       train/
+  rollout.py one episode     dataset.py  n-step TD samples + D4 aug
+  io.py      episode JSON     trainer.py  fit to TD targets (frozen target net)
+  runner.py  N eps (mp)       logger.py
 ```
 
-### `blockblaster/agent/`
+Flow: `run_loop.py` → `sim/runner.run_simulations` (each worker calls `agent/policy.select_action` per step, writes a trajectory) → `train/trainer.train` (loads trajectories via `train/dataset`, fits `model/value_net`). See [algorithm.md](algorithm.md) and [training.md](training.md).
+
+### Live phone (plays the real game)
 
 ```
-policy.py       # greedy 1-step lookahead + ε-exploration; adds Phi(s')
+assist/
+  vision/                          ui/                    render/
+    detection.py interactables       app.py   main loop      phone.py    mirror panel
+    scanner.py   board → 8×8         events.py keys/mouse    recon.py    reconstructed scene
+    piece_recognizer.py → Piece      state.py  AppState      cnn_debug.py
+    piece_mask.py geometric mask     overlay.py controls     frame_diff.py motion + servo debug
+    analyzer.py  background worker    layout.py panel rects
+    calibration.py (legacy box I/O)
+  advisor.py     value net → Suggestion
+  collector.py   real-crop capture tool
+
+control/
+  device.py            Device protocol + make_device()
+  android_screenrecord.py / android_adb.py   capture + tap/swipe backends
+  scrcpy_control.py    persistent scrcpy v1.20 touch session (servo gestures)
+  ios_readonly.py      iOS mirror (read-only)
+  servo.py             closed-loop PD placement
+  coords.py            piece/cell → pixel anchor helpers
 ```
 
-### `blockblaster/sim/`
+Flow: `play.py` → `assist/ui/app.run`. The UI loop pulls frames from a `control.Device`, a background `assist/vision/analyzer.AnalysisWorker` detects the board + tray pieces and asks `assist/advisor.Advisor` for a `Suggestion`, and the panels render it. Pressing **A** runs `control/servo.place` on a worker thread to execute the suggestion on-device. See [perception.md](perception.md), [assist-gui.md](assist-gui.md), [visual-servo.md](visual-servo.md), [control-stack.md](control-stack.md).
 
-```
-rollout.py      # single episode → trajectory dict
-io.py           # write / read episode JSON
-runner.py       # run N episodes (optionally multiprocessing, spawn-safe)
-```
+## The one shared artifact
 
-### `blockblaster/train/`
+`checkpoints/best_value_net.pt` (the champion value net) is consumed by:
 
-```
-dataset.py      # EpisodeDataset: shaped MC returns + D4 augmentation
-trainer.py      # fit v_theta, eval on test split, save best checkpoint
-logger.py       # epoch logging helpers
-```
+- `assist/advisor.Advisor`, which loads it (as `model.pt` by default) and exposes `suggest(board_grid, queue) → Suggestion`.
 
-### `blockblaster/assist/`
+Everything else on the live side is perception/control and knows nothing about the RL internals — the servo only knows "drag the finger so this blob lines up with that target."
 
-```
-app.py             # top-level pygame app (mode dispatch)
-app_events.py      # keyboard / mouse / chip event handling
-app_overlay.py     # HUD chips, target markers, ghost overlays
-app_state.py       # AppState dataclass (calibration, runtime flags)
-app_autoplay.py    # auto-play loop wired into the assist GUI
-device_stream.py   # iOS frame source via tunneld / DVT
-calibration.py     # persisted grid + queue bounding boxes
-scanner.py         # crop calibrated 8×8 grid → Board (+ ghost detection)
-piece_recognizer.py# queue-slot → Piece via CNN (with heuristic fallback)
-piece_mask.py      # cell-occupancy mask extraction
-piece_debug.py     # per-slot debug crops dumped to assist_debug/
-advisor.py         # wraps the value net for one-shot move suggestions
-analyzer.py        # higher-level frame → advice glue
-layout.py          # window / panel rects
-render.py          # phone panel, recon panel, status bar, overlays
-render_phone.py    # phone mirror panel drawing
-render_recon.py    # reconstructed scene panel drawing
-```
+## Entry points
 
-### `blockblaster/control/`
-
-See [android-autoplay.md → Control module layout](android-autoplay.md#control-module-layout)
-for the device I/O stack and the scrcpy-based visual servo.
-
-### `blockblaster/piece_cnn/`
-
-See [assist-gui.md → Piece classifier](assist-gui.md#piece-classifier) for the
-synth-data trainer and inference wrapper.
-
-## Where to look next
-
-- **How the agent decides moves** → [algorithm.md](algorithm.md)
-- **What every tunable does** → [hyperparameters.md](hyperparameters.md)
-- **How to train it** → [training.md](training.md)
-- **Running the assist GUI** → [assist-gui.md](assist-gui.md)
-- **Driving a physical phone** → [android-autoplay.md](android-autoplay.md)
+| Command | Does |
+|---------|------|
+| `uv run simulate.py` | One batch of self-play episodes → `simulations/`. |
+| `uv run train.py` | One training run on stored episodes → `checkpoints/`. |
+| `uv run run_loop.py -r N` | N rounds of simulate→train with the promotion gate. |
+| `uv run main.py [--seed S]` | Offline pygame demo with the champion net. |
+| `uv run play.py --platform {ios,android}` | Live assist GUI (+ Android auto-play). |
+| `uv run train_piece_cnn.py` | Train `piece_cnn.pt`. |

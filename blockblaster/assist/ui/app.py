@@ -38,6 +38,49 @@ _TARGET_FPS = 60
 _AUTO_POST_PLACE_S = 1.5
 
 
+def _phone_content() -> pygame.Rect:
+    """Inner content rect of the phone panel (matches draw_phone_panel)."""
+    return pygame.Rect(PHONE_RECT.x + 4, PHONE_RECT.y + 30,
+                       PHONE_RECT.width - 8, PHONE_RECT.height - 38)
+
+
+def _phone_map(frame_w: int, frame_h: int) -> tuple[float, int, int]:
+    """(scale, blit_x, blit_y) mapping frame px → phone-panel screen px."""
+    if frame_w <= 0 or frame_h <= 0:
+        return (1.0, 0, 0)
+    c = _phone_content()
+    scale = min(c.width / frame_w, c.height / frame_h)
+    bx = c.x + (c.width - int(frame_w * scale)) // 2
+    by = c.y + (c.height - int(frame_h * scale)) // 2
+    return (scale, bx, by)
+
+
+def _draw_board_edit(
+    screen: pygame.Surface, state: AppState, font: pygame.font.Font
+) -> None:
+    """Draw the manual board override box / in-progress drag on the phone panel."""
+    scale, bx, by = state.phone_map
+
+    def to_screen(fx: int, fy: int) -> tuple[int, int]:
+        return (bx + int(fx * scale), by + int(fy * scale))
+
+    if state.drag_start_frame is not None and state.drag_cur_frame is not None:
+        x0, y0 = to_screen(*state.drag_start_frame)
+        x1, y1 = to_screen(*state.drag_cur_frame)
+        rect = pygame.Rect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+        pygame.draw.rect(screen, (255, 200, 40), rect, width=2)
+    elif state.board_override is not None:
+        ox, oy, ow, oh = state.board_override
+        tl = to_screen(ox, oy)
+        rect = pygame.Rect(tl[0], tl[1], int(ow * scale), int(oh * scale))
+        pygame.draw.rect(screen, (255, 200, 40), rect, width=2)
+
+    if state.edit_board:
+        msg = font.render("EDIT BOARD: drag a box on the phone screen",
+                          True, (255, 200, 40))
+        screen.blit(msg, (PHONE_RECT.x + 10, PHONE_RECT.y + PHONE_RECT.height - 24))
+
+
 def _maybe_dispatch_servo(device: Device, state: AppState, snap) -> None:
     """Run one closed-loop servo placement of the current suggestion (key 'a').
 
@@ -151,6 +194,10 @@ def run(
             state.recalibrate_request = False
             analyzer.recalibrate()
             diff_tracker.clear_suggestion()
+            state.board_override = None  # revert to auto-detection
+
+        analyzer.set_board_override(state.board_override)
+        state.phone_map = _phone_map(state.frame_w, state.frame_h)
 
         if state.autoplay_on and not state.servo_busy and now >= state.auto_next_after:
             _maybe_dispatch_servo(device, state, snap)
@@ -165,6 +212,7 @@ def run(
             error_msg=device.last_error,
             small_font=small_font,
         )
+        _draw_board_edit(screen, state, small_font)
 
         draw_recon_panel(
             screen,
@@ -205,6 +253,7 @@ def run(
             autoplay_on=state.autoplay_on,
             servo_busy=state.servo_busy,
             show_debug=state.show_debug,
+            edit_board=state.edit_board,
         )
 
         pygame.display.flip()

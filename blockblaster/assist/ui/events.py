@@ -23,15 +23,60 @@ def dispatch_event(event: pygame.event.Event, *, state: AppState) -> bool:
         action = _hit_test_chips(event.pos, state)
         if action == "quit":
             return False
-        if action == "screenshot":
+        elif action == "screenshot":
             _save_screenshot()
-        if action == "autoplay":
+        elif action == "autoplay":
             state.autoplay_on = not state.autoplay_on
-        if action == "debug":
+        elif action == "debug":
             state.show_debug = not state.show_debug
-        if action == "recalibrate":
+        elif action == "editboard":
+            state.edit_board = not state.edit_board
+        elif action == "recalibrate":
             state.recalibrate_request = True
+        elif action is None and state.edit_board:
+            f = _screen_to_frame(event.pos, state)
+            if f is not None:
+                state.drag_start_frame = f
+                state.drag_cur_frame = f
+    if event.type == pygame.MOUSEMOTION and state.drag_start_frame is not None:
+        f = _screen_to_frame(event.pos, state)
+        if f is not None:
+            state.drag_cur_frame = f
+    if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+        if state.drag_start_frame is not None:
+            _finish_board_drag(event.pos, state)
     return True
+
+
+def _finish_board_drag(pos: tuple[int, int], state: AppState) -> None:
+    """Commit the dragged box as the manual board override (frame px)."""
+    end = _screen_to_frame(pos, state) or state.drag_cur_frame
+    start = state.drag_start_frame
+    state.drag_start_frame = None
+    state.drag_cur_frame = None
+    if start is None or end is None:
+        return
+    x = min(start[0], end[0])
+    y = min(start[1], end[1])
+    w = abs(end[0] - start[0])
+    h = abs(end[1] - start[1])
+    if w > 10 and h > 10:
+        state.board_override = (x, y, w, h)
+        print(f"[edit] board override set: {(x, y, w, h)}")
+
+
+def _screen_to_frame(
+    pos: tuple[int, int], state: AppState
+) -> Optional[tuple[int, int]]:
+    """Map a phone-panel screen point to frame px, or None if outside the panel."""
+    scale, bx, by = state.phone_map
+    if scale <= 0:
+        return None
+    fx = (pos[0] - bx) / scale
+    fy = (pos[1] - by) / scale
+    if fx < 0 or fy < 0 or fx > state.frame_w or fy > state.frame_h:
+        return None
+    return int(fx), int(fy)
 
 
 def _handle_keydown(event: pygame.event.Event, state: AppState) -> bool:
@@ -43,6 +88,8 @@ def _handle_keydown(event: pygame.event.Event, state: AppState) -> bool:
         state.autoplay_on = not state.autoplay_on
     if event.key == pygame.K_d:
         state.show_debug = not state.show_debug
+    if event.key == pygame.K_e:
+        state.edit_board = not state.edit_board
     if event.key == pygame.K_r:
         state.recalibrate_request = True
     return True

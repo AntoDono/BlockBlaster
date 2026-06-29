@@ -80,6 +80,16 @@ class AnalysisWorker:
         self._confirmed_board: Optional[np.ndarray] = None
         self._confirmed_queue: Optional[tuple] = None
 
+        # Manual board-region override (frame px (x,y,w,h)); when set, it is used
+        # for board scanning/suggestion instead of the auto-detected board.
+        self._board_override: Optional[tuple[int, int, int, int]] = None
+
+    def set_board_override(
+        self, bbox: Optional[tuple[int, int, int, int]]
+    ) -> None:
+        """Force the board region (or pass ``None`` to resume auto-detection)."""
+        self._board_override = bbox
+
     def start(self) -> None:
         if self._running:
             return
@@ -158,7 +168,10 @@ class AnalysisWorker:
 
         board_grid = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=bool)
         board_bbox = None
-        if board is not None:
+        if self._board_override is not None:
+            board_bbox = self._board_override
+            board_grid = scan_board(frame, board_bbox)
+        elif board is not None:
             board_bbox = board.bbox
             board_grid = scan_board(frame, board_bbox)
 

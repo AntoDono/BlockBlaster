@@ -18,3 +18,12 @@ class AppState:
     show_debug: bool = False
     servo_debug: Optional[object] = None  # control.servo.ServoDebug while active
     recalibrate_request: bool = False
+
+    # Manual board editing: drag a box on the phone panel to override the
+    # auto-detected board region. ``phone_map`` is the live (scale, bx, by) that
+    # maps frame px → phone-panel screen px (published each draw).
+    edit_board: bool = False
+    board_override: Optional[tuple[int, int, int, int]] = None  # (x,y,w,h) frame px
+    phone_map: tuple[float, int, int] = (1.0, 0, 0)
+    drag_start_frame: Optional[tuple[int, int]] = None  # in-progress drag anchor
+    drag_cur_frame: Optional[tuple[int, int]] = None

@@ -171,6 +171,37 @@ def _draw_servo_debug(
     screen.blit(font.render(line2, True, col), (blit_x + 6, blit_y + 6 + lh))
     screen.blit(font.render(line3, True, col), (blit_x + 6, blit_y + 6 + 2 * lh))
 
+    # Prominent status banner for the current servo phase / event.
+    status = getattr(dbg, "status", "") or ""
+    if status:
+        _draw_status_banner(screen, status, locked, blit_x, blit_y + 6 + 3 * lh + 4, font)
+
+
+# Status → banner colour (bg, fg).
+_STATUS_COLORS = {
+    "BOUNDARY HIT": ((200, 50, 50), (255, 235, 220)),
+    "FOCUSED": ((150, 110, 20), (255, 240, 200)),
+    "LOCKED": ((30, 130, 70), (220, 255, 230)),
+    "SEARCHING": ((60, 60, 80), (200, 200, 220)),
+    "TRAVELING": ((30, 70, 110), (210, 235, 255)),
+}
+
+
+def _draw_status_banner(
+    screen: pygame.Surface, status: str, locked: bool, x: int, y: int,
+    font: pygame.font.Font,
+) -> None:
+    bg, fg = (30, 70, 110), (210, 235, 255)
+    for key, colors in _STATUS_COLORS.items():
+        if status.startswith(key):
+            bg, fg = colors
+            break
+    label = font.render(status, True, fg)
+    box = pygame.Rect(x, y, label.get_width() + 14, label.get_height() + 8)
+    pygame.draw.rect(screen, bg, box, border_radius=5)
+    pygame.draw.rect(screen, fg, box, width=1, border_radius=5)
+    screen.blit(label, (box.x + 7, box.y + 4))
+
 
 def _draw_suggestion_outline(
     screen: pygame.Surface,

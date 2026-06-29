@@ -1,126 +1,115 @@
 <div align="center">
 
 # **BlockBlaster**
-## An end-to-end Monte Carlo value agent that plays Block Blast on a real phone
+## A value-network agent that plays Block Blast on a real phone
 
-*Train a value network in simulation. Recognise the live game from a mirrored screen. Drive the finger via a closed-loop visual servo. Watch the phone play itself.*
+*Train a value network in simulation. Recognise the live game from a mirrored screen. Drive the finger with a closed-loop visual servo. Watch the phone play itself.*
 
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)](https://opencv.org)
 [![pygame](https://img.shields.io/badge/pygame--ce-2.5-9C27B0?style=for-the-badge&logo=python&logoColor=white)](https://pyga.me)
-[![ADB](https://img.shields.io/badge/ADB-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://developer.android.com/tools/adb)
 [![scrcpy](https://img.shields.io/badge/scrcpy-1.20-000000?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Genymobile/scrcpy)
 
-### Demo
-
 ![BlockBlaster auto-play demo](assets/Blockblaster_Demo.gif)
-
-> The agent picks moves, the visual servo lands them on a real Android device. Full-resolution clip: [`assets/Blockblaster_Demo.mp4`](assets/Blockblaster_Demo.mp4).
 
 </div>
 
 ---
 
-## What this actually is
+## What this is
 
-Most "Block Blast AI" projects stop at search heuristics or a paper plot of MC returns. This repo runs the whole loop end-to-end:
+Three real subsystems wired into one loop:
 
 ```mermaid
 flowchart LR
-    subgraph TRAIN["**1. Train v(s)**"]
+    subgraph TRAIN["1 · Train v(s)"]
         direction TB
-        T1["Simulator<br/>(pure-Python)"]
-        T2["CNN value head"]
-        T3["Monte Carlo returns"]
+        T1["Pure-Python<br/>simulator"]
+        T2["CNN value net"]
+        T3["n-step TD targets<br/>+ frozen target net"]
         T4["Potential-based<br/>reward shaping"]
-        T5["D4 symmetry<br/>augmentation"]
+        T5["D4 symmetry aug"]
         T1 --> T2 --> T3 --> T4 --> T5
     end
-
-    subgraph PERCEIVE["**2. Perceive game**"]
+    subgraph PERCEIVE["2 · Perceive"]
         direction TB
-        P1["scrcpy mirror<br/>(live frames)"]
-        P2["Board / queue scanner<br/>(HSV + grid)"]
-        P3["Piece classifier CNN<br/>(synth-data trained)"]
-        P4["Assist GUI overlay<br/>+ ghost recon panel"]
+        P1["Live screen mirror"]
+        P2["Interactable detection<br/>(bg-subtraction)"]
+        P3["Board scanner (HSV 8×8)"]
+        P4["Piece CNN (synthetic-trained)"]
         P1 --> P2 --> P3 --> P4
     end
-
-    subgraph ACT["**3. Act on the device**"]
+    subgraph ACT["3 · Act"]
         direction TB
-        A1["Advisor → suggestion"]
-        A2["Visual servo drag<br/>(P controller)"]
-        A3["Per-frame template match<br/>(piece silhouette)"]
-        A4["Release when locked"]
+        A1["Advisor → suggestion<br/>(greedy on v(s))"]
+        A2["Visual servo (PD)"]
+        A3["Frame-diff edge tracking"]
+        A4["Release on lock"]
         A1 --> A2 --> A3 --> A4
     end
-
     TRAIN ==> PERCEIVE ==> ACT
     ACT -. closed loop .-> PERCEIVE
-
-    classDef stage fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#e2e8f0
-    class TRAIN,PERCEIVE,ACT stage
 ```
 
-Each stage is a real, runnable subsystem — not a notebook stub. The agent that decides moves is the same agent that plays in simulation; the perception pipeline that draws overlays is the same one that feeds the action loop; the servo that drags pieces closes its own loop on every frame off a per-frame template match.
+- **The value network** is a small CNN trained on **n-step TD targets** bootstrapped from a frozen target net, with **potential-based reward shaping** (Ng, Harada & Russell 1999) and **D4 symmetry augmentation**. Moves are chosen by a **3-piece beam search** that scores the true discounted return. An iterative `simulate → train` loop promotes a challenger to champion only when it wins a **paired multi-seed evaluation**.
+- **The perception stack** segments the mirrored screen into interactable blobs (background subtraction), scans the board into an 8×8 occupancy grid (HSV), and classifies the three tray pieces with a tiny CNN **trained entirely on synthetic renders**.
+- **The visual servo** closes the loop on the device: it frame-diffs the board against a pre-grab baseline to track the held piece by the **edges of its motion blob**, and PD-steps the finger until the piece's footprint is locked onto the advisor's target cells — then lifts.
 
-### Why the pieces are interesting
-
-**The value network** is a small CNN trained via Monte Carlo returns with **potential-based reward shaping** (Ng, Harada & Russell 1999) and **D4 symmetry augmentation** of board states. The agent acts greedily on afterstate value with the shaping potential added back at decision time so the optimal policy is unchanged. See [`docs/algorithm.md`](docs/algorithm.md).
-
-**The perception stack** is built on a tiny piece-classifier CNN trained entirely on synthetic data — every queue tile, every render variant, generated on the fly. The assist GUI overlays the agent's planned move on the mirrored screen in real time and includes a **reconstructed-scene panel** that lets you see what the scanner sees (placed cells, ghost preview, queue confidences). See [`docs/assist-gui.md`](docs/assist-gui.md).
-
-**The visual servo** is the bit most projects skip. It closes the loop on the device: every frame, diff the board crop against the pre-grab snapshot to get a motion mask, diff again against the previous frame as a glow-resistant translation gate, template-match the held piece's silhouette within a small window around the last trusted location, and PD-step the finger toward the matched anchors until the error and the match score are both inside their tolerances — then lift.
+See [`docs/`](docs/) for the full write-up of each part.
 
 ## Quick start
 
 ```bash
-uv sync                                          # install everything
-uv run simulate.py                               # collect MC episodes
-uv run train.py                                  # fit v(s) on the dataset
-uv run main.py                                   # watch the trained agent play in-sim
-uv run play.py --platform ios --mode assist      # live overlay on a mirrored iPhone
-uv run play.py --platform android                # full auto-play on Android
+uv sync                          # install everything
+
+# ── Train the value agent (simulation only) ──
+uv run run_loop.py --rounds 10   # iterative simulate → train with promotion gate
+uv run main.py                   # watch the trained agent play in a pygame window
+
+# ── Train the piece classifier ──
+uv run train_piece_cnn.py        # synth + real data → piece_cnn.pt
+
+# ── Live on a phone ──
+uv run play.py --platform ios                   # read-only assist overlay (mirrored iPhone)
+uv run play.py --platform android [--serial S]  # assist + on-device auto-play (ADB)
 ```
 
-The Android path is the headline feature: connect a phone over ADB, launch Block Blast, run the command, and the agent will calibrate the board, pick moves, and drive the finger via the closed-loop servo.
+In the GUI, press **`A`** to toggle continuous auto-play (Android only — needs touch injection). iOS is read-only (Apple blocks input injection without a paired Mac/Xcode signature).
 
 ## Repository tour
 
 | Path | What lives there |
 |------|------------------|
-| `blockblaster/game/` | Pure-Python Block Blast simulator: pieces, board, scoring, legal-move generation. |
-| `blockblaster/model/` | State encoder and value-network architecture. |
-| `blockblaster/agent/` | Decision policy: afterstate enumeration, value lookup, beam-search lookahead. |
-| `blockblaster/piece_cnn/` | Synthetic data generator and CNN that classifies queue tiles from pixels. |
-| `blockblaster/assist/` | Pygame assist GUI, screen analyzer, board/queue scanner, recon panel, advisor wiring. |
-| `blockblaster/control/` | Device abstractions (ADB, scrcpy), `servo.py` closed-loop placer, calibration. |
-| `docs/` | Long-form documentation per subsystem (see below). |
+| `blockblaster/game/` | Pure-Python simulator: pieces, board, scoring, potential, env. |
+| `blockblaster/model/` | State encoder, value-network CNN, checkpoint I/O. |
+| `blockblaster/agent/` | `select_action`: 3-piece beam-search policy over `v(s)`. |
+| `blockblaster/sim/` | Episode rollout, JSON I/O, multi-process runner. |
+| `blockblaster/train/` | n-step TD dataset (+ D4 aug), trainer (target net), logger. |
+| `blockblaster/piece_cnn/` | Synthetic renderer + piece classifier CNN + inference wrapper. |
+| `blockblaster/assist/` | Live assist app: `vision/` (detect/scan/recognise/advise), `ui/` (pygame app, events, panels), `render/` (panel drawing). |
+| `blockblaster/control/` | Device backends (ADB, screenrecord, scrcpy touch, iOS) + `servo.py` closed-loop placer. |
+| `blockblaster/gui/` | Standalone offline pygame demo (`main.py`). |
+| `docs/` | Subsystem documentation. |
 
 ## Documentation
 
-The README is just the index. Each doc cross-references the others, so any one of them is a reasonable entry point depending on what you came for.
-
 | Doc | Read it for |
 |-----|-------------|
-| [`docs/game-rules.md`](docs/game-rules.md) | Board / queue / scoring rules and the 42-piece enumeration. |
-| [`docs/architecture.md`](docs/architecture.md) | Top-level folder layout and per-subpackage maps. |
-| [`docs/algorithm.md`](docs/algorithm.md) | State encoding, value network, Monte Carlo pipeline with beam-search lookahead, potential-based reward shaping, D4 augmentation, champion / challenger checkpointing. |
-| [`docs/policy.md`](docs/policy.md) | How `select_action` works: 3-piece beam search, full-return scoring (`Σ γ^k r_k + γ^K V*(leaf)`), distinct-orderings handling, dead-end semantics, future improvements. |
-| [`docs/sim-configs.md`](docs/sim-configs.md) | Named `default` vs `quality` simulation presets — which params to flip for fast-iteration vs trustworthy data, and why. |
-| [`docs/hyperparameters.md`](docs/hyperparameters.md) | Every knob in [`param.py`](param.py) with its default and meaning. |
-| [`docs/training.md`](docs/training.md) | `simulate` → `train` → repeat loop, generated files, how to watch the trained agent play. |
-| [`docs/assist-gui.md`](docs/assist-gui.md) | Side-by-side viewer, calibration flow, key bindings, the synthetic-data piece classifier. |
-| [`docs/android-autoplay.md`](docs/android-autoplay.md) | Emulator / physical-phone setup, scrcpy v1.20 + adbutils touch tunnel, end-to-end auto-play. |
+| [`docs/architecture.md`](docs/architecture.md) | Folder layout, data flow, entry points. |
+| [`docs/game-rules.md`](docs/game-rules.md) | Board / queue / scoring rules and the 42-piece set. |
+| [`docs/algorithm.md`](docs/algorithm.md) | Encoder, value net, potential shaping, n-step TD + target net, beam-search policy. |
+| [`docs/training.md`](docs/training.md) | The `simulate → train` loop, champion/challenger promotion, generated files. |
+| [`docs/hyperparameters.md`](docs/hyperparameters.md) | Every knob in [`param.py`](param.py). |
+| [`docs/perception.md`](docs/perception.md) | Interactable detection, board scanner, piece CNN, advisor. |
+| [`docs/assist-gui.md`](docs/assist-gui.md) | Panels, key bindings / buttons, auto-play, board editing, debug overlay. |
+| [`docs/visual-servo.md`](docs/visual-servo.md) | The closed-loop PD placer: edge tracking, ROI focus, containment. |
+| [`docs/control-stack.md`](docs/control-stack.md) | Device backends and the scrcpy v1.20 touch tunnel. |
 
 ## Status & limitations
 
-Honest about what works and what doesn't:
-
-- **Simulation pipeline:** stable. Train, evaluate, watch in-sim.
-- **iOS assist (read-only overlay):** works on a mirrored iPhone — pure visualisation, no input injection (Apple doesn't allow it without a paired Mac/Xcode signature).
-- **Android auto-play:** working but device-specific. The servo's diff threshold and match-score tolerances may need a small retune for very different board palettes; the geometry-related knobs (step sizes, error thresholds, search radius) are expressed as cell ratios and resolve from the calibrated grid automatically. See [`blockblaster/config/params.py`](blockblaster/config/params.py).
-- **Calibration:** semi-manual on first use — drop the grid + queue boxes on the mirrored frame once, persisted to JSON for subsequent runs.
-
-If you fork this and play with a different game, the perception + control split is reusable: the servo doesn't know anything about Block Blast specifically, only about "drag this finger so that thing on screen lines up with that target."
+- **Simulation / training:** stable. `run_loop.py`, `main.py`.
+- **Piece classifier:** ~99% on held-out real crops; near-deterministic on bar lengths after the resolution-preserving rewrite.
+- **iOS assist:** read-only overlay (no input injection).
+- **Android auto-play:** works, device-specific. Servo thresholds are tuned for the current capture resolution; the detection morphology and diff thresholds may need a small retune for very different board palettes.
+- **Board detection:** auto-detected each frame; press **`E`** to manually draw the board box if detection drifts, **`R`** to recalibrate.
