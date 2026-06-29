@@ -99,6 +99,10 @@ class FrameDiffTracker:
         self._suggestion = None
         self._board_bbox = None
 
+    def clear_event(self) -> None:
+        """Drop the motion-event hold so analysis can resume after a servo fail."""
+        self._event_ts = 0.0
+
     @property
     def suggestion(self) -> Optional[Suggestion]:
         return self._suggestion

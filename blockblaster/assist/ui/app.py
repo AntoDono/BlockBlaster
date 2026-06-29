@@ -39,9 +39,9 @@ from blockblaster.assist.render.phone import SUGGEST_GOLD, panel_content_rect
 from blockblaster.control.device import Device, device_status_detail
 
 _TARGET_FPS = 60
-_AUTO_POST_PLACE_S = 1.5
+_AUTO_POST_PLACE_S = 1.2
 _AUTO_RETRY_DELAY_S = 1.0
-_AUTO_RECALIBRATE_FAILS = 3
+_PRE_MOVE_SCAN_TIMEOUT_S = 3.0
 _SERVO_ANALYSIS_HOLD_S = 86400.0  # until servo ok; then replaced with _AUTO_POST_PLACE_S
 
 
@@ -49,24 +49,82 @@ def _suggestion_key(sug: Suggestion) -> tuple[int, int, int, int]:
     return (sug.slot, sug.row, sug.col, sug.piece.piece_id)
 
 
-def _autoplay_ready(
+def _recalibrate(
+    analyzer: AnalysisWorker,
+    state: AppState,
+    diff_tracker: FrameDiffTracker,
+    *,
+    clear_board_override: bool = False,
+) -> None:
+    analyzer.set_pause_until(0.0)
+    analyzer.reset_analysis()
+    analyzer.reset_debounce()
+    diff_tracker.clear_suggestion()
+    diff_tracker.clear_event()
+    if clear_board_override:
+        state.board_override = None
+
+
+def _autoplay_wants_move(
     state: AppState, snap, analyzer: AnalysisWorker, now: float,
 ) -> bool:
     if not state.autoplay_on or state.servo_busy:
         return False
-    if snap.suggestion is None:
-        return False
-    if state.recalibrate_after > 0 and now < state.recalibrate_after:
-        return False
     if state.await_fresh_suggestion:
         if analyzer.analysis_paused(now):
+            return False
+        if snap.suggestion is None:
             return False
         if _suggestion_key(snap.suggestion) == state.placed_suggestion_key:
             return False
         state.await_fresh_suggestion = False
-        return True
-    # Retry path: analysis stays paused to keep this snap frozen; don't gate on pause.
-    return now >= state.auto_next_after
+    elif now < state.auto_next_after:
+        return False
+    return True
+
+
+def _tick_autoplay(
+    device: Device,
+    state: AppState,
+    snap,
+    analyzer: AnalysisWorker,
+    diff_tracker: FrameDiffTracker,
+    now: float,
+):
+    """Recalibrate before each move; on fail, loop back here after a short delay."""
+    if not _autoplay_wants_move(state, snap, analyzer, now):
+        return snap
+
+    if not state.await_pre_move_scan:
+        _recalibrate(analyzer, state, diff_tracker)
+        state.await_pre_move_scan = True
+        state.pre_move_scan_after = now
+        return analyzer.snapshot()
+
+    if _snap_ready_for_servo(snap, analyzer, now):
+        state.await_pre_move_scan = False
+        state.pre_move_scan_after = 0.0
+        _maybe_dispatch_servo(device, state, snap, analyzer)
+        return snap
+
+    if (
+        state.pre_move_scan_after > 0
+        and now - state.pre_move_scan_after >= _PRE_MOVE_SCAN_TIMEOUT_S
+    ):
+        state.await_pre_move_scan = False
+        state.pre_move_scan_after = 0.0
+        append_log(state.log_lines, "[auto] scan timeout — recalibrating again")
+
+    return snap
+
+
+def _snap_ready_for_servo(snap, analyzer: AnalysisWorker, now: float) -> bool:
+    if snap.suggestion is None or snap.board_bbox is None:
+        return False
+    sug = snap.suggestion
+    if not (0 <= sug.slot < len(snap.pieces)):
+        return False
+    return not analyzer.analysis_paused(now)
 
 
 def _phone_map(frame_w: int, frame_h: int) -> tuple[float, int, int]:
@@ -154,24 +212,20 @@ def _maybe_dispatch_servo(device: Device, state: AppState, snap, analyzer: Analy
         finally:
             now = time.monotonic()
             if ok:
-                state.consecutive_servo_fails = 0
                 state.placed_suggestion_key = _suggestion_key(sug)
                 state.await_fresh_suggestion = True
                 analyzer.discard_suggestion()
                 analyzer.reset_debounce()
                 analyzer.set_pause_until(now + _AUTO_POST_PLACE_S)
             else:
-                state.consecutive_servo_fails += 1
                 state.auto_next_after = now + _AUTO_RETRY_DELAY_S
-                if state.consecutive_servo_fails >= _AUTO_RECALIBRATE_FAILS:
-                    state.consecutive_servo_fails = 0
-                    state.recalibrate_after = now + _AUTO_RETRY_DELAY_S
-                    state.auto_next_after = state.recalibrate_after
-                    append_log(
-                        state.log_lines,
-                        f"[auto] {_AUTO_RECALIBRATE_FAILS} servo fails — recalibrating in "
-                        f"{_AUTO_RETRY_DELAY_S:.1f}s",
-                    )
+                state.await_pre_move_scan = False
+                state.pre_move_scan_after = 0.0
+                analyzer.set_pause_until(0.0)
+                append_log(
+                    state.log_lines,
+                    f"[auto] retry in {_AUTO_RETRY_DELAY_S:.1f}s",
+                )
             state.servo_busy = False
             state.servo_debug = None
 
@@ -250,28 +304,19 @@ def run(
         snap = analyzer.snapshot()
         diff_tracker.set_suggestion(snap.suggestion, snap.board_bbox)
 
-        if state.recalibrate_after > 0 and now >= state.recalibrate_after:
-            state.recalibrate_after = 0.0
-            analyzer.set_pause_until(0.0)
-            state.reset_analysis_request = True
-
         if state.reset_analysis_request:
             state.reset_analysis_request = False
-            analyzer.set_pause_until(0.0)
-            analyzer.reset_analysis()
-            analyzer.reset_debounce()
-            diff_tracker.clear_suggestion()
-            state.board_override = None  # revert to auto-detection
-            state.await_fresh_suggestion = False
-            state.placed_suggestion_key = None
+            _recalibrate(
+                analyzer, state, diff_tracker, clear_board_override=True,
+            )
+            state.await_pre_move_scan = False
             append_log(state.log_lines, "[recalibrate] board/suggestion cache cleared")
             snap = analyzer.snapshot()
 
         analyzer.set_board_override(state.board_override)
         state.phone_map = _phone_map(state.frame_w, state.frame_h)
 
-        if _autoplay_ready(state, snap, analyzer, now):
-            _maybe_dispatch_servo(device, state, snap, analyzer)
+        snap = _tick_autoplay(device, state, snap, analyzer, diff_tracker, now)
 
         screen.fill(BG_COLOR)
 
